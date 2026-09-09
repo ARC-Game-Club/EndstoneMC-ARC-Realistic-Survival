@@ -1,6 +1,6 @@
 # ARC Realistic Survival - 真实生存插件
 [![Codacy Grade](https://app.codacy.com/project/badge/Grade/035827370d734c539602adbeca85f6d4)](https://app.codacy.com/gh/DEVILENMO/EndstoneMC-ARC-Realistic-Survival/dashboard?utm_source=gh&utm_medium=referral&utm_content=&utm_campaign=Badge_grade)
-[![Version](https://img.shields.io/badge/version-v0.3.29-blue)](https://github.com/DEVILENMO/EndstoneMC-ARC-Realistic-Survival)
+[![Version](https://img.shields.io/badge/version-v0.3.30-blue)](https://github.com/DEVILENMO/EndstoneMC-ARC-Realistic-Survival)
 
 
 一个为 Endstone 服务器打造的真实生存插件，添加口渴值、营养学、丧尸病毒、物品效果等功能，让生存体验更加真实有趣。
@@ -29,7 +29,7 @@
 - **感染值 0-100**：被配置的生物攻击会增加感染值
 - **可配置感染源**：支持精确实体（如 `minecraft:zombie`）或整命名空间（如 `minecraft:`），单独实体优先于命名空间规则
 - **临界恶化**：默认超过 50 后每分钟 +5，低于 50 每分钟 -2
-- **丧尸化**：感染满 100 时先清零感染并落库，再击杀玩家、原地生成丧尸（清零不依赖是否杀死成功）
+- **丧尸化**：感染满 100 时先清零感染并落库，再以 `kill` 击杀玩家、原地生成丧尸（清零不依赖是否杀死成功；不用扣血）
 
 ### 📊 弧光核心侧边栏（v0.3.12）
 - 启动时向 `arc_core` 注册专属页面 **`ars_health`（真实生存）**
@@ -289,6 +289,9 @@ python -m build
 ```
 
 ## 📝 更新日志
+
+### v0.3.30
+- 感染满值丧尸化改为控制台 `kill`（失败再回退 `kill @s` / `suicide`），不再用 `health=0`（满血时只会像扣 20 血且未必真正死亡）
 
 ### v0.3.29
 - 修复定时任务 purecall 崩服：丧尸化延迟任务改用 `persist_by_xuid` 落库；口渴改速后恢复疾跑经 `_run_player_task` 重取在线玩家
