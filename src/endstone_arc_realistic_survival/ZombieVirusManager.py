@@ -379,30 +379,15 @@ class ZombieVirusManager:
             except Exception:
                 pass
 
-        # 2) 直接 kill（不用 health=0：满血时只会像扣 20 血且未必真正死亡）
-        killed = False
+        # 2) 控制台 kill；失败不影响已清零的感染值
         try:
-            server = self.plugin.server
-            sender = getattr(server, "command_sender", None)
-            if sender is not None and hasattr(server, "dispatch_command") and player_name:
-                # 控制台 dispatch，避免玩家权限不足；名字含空格时加引号
+            if player_name:
                 safe_name = player_name.replace('"', '\\"')
-                cmd = f'kill "{safe_name}"'
-                killed = bool(server.dispatch_command(sender, cmd))
+                self.plugin.server.dispatch_command(
+                    self.plugin.server.command_sender, f'kill "{safe_name}"'
+                )
         except Exception as e:
             self._log("error", f"[ARS] kill via dispatch_command error: {e}")
-        if not killed:
-            try:
-                if hasattr(player, "perform_command"):
-                    killed = bool(player.perform_command("kill @s"))
-            except Exception as e:
-                self._log("error", f"[ARS] kill via kill @s error: {e}")
-        if not killed:
-            try:
-                if hasattr(player, "perform_command"):
-                    player.perform_command("suicide")
-            except Exception as e:
-                self._log("error", f"[ARS] kill via suicide error: {e}")
 
         def spawn_zombie():
             try:
