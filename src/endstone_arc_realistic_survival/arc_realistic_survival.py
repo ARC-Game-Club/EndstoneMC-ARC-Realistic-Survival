@@ -97,9 +97,13 @@ class ARCRealisticSurvivalPlugin(Plugin):
         self.thirst_items_map = {}
         self.thirst_consume_debug = False
         self.thirst_task = None
-        # 口渴 0→因子 0.45（45%），100→因子 1.15（115%）；再乘基速倍率（默认 1.0 = 原版 walk_speed 0.10）
-        self.thirst_speed_at_zero = -0.55
-        self.thirst_speed_at_full = 0.15
+        # 口渴移速分段：>80 +20%；[30,80] 无加成；<30 -20%；<15 -50%
+        self.thirst_speed_bonus_threshold = 80
+        self.thirst_speed_bonus = 0.20
+        self.thirst_speed_slow_threshold = 30
+        self.thirst_speed_slow = -0.20
+        self.thirst_speed_severe_threshold = 15
+        self.thirst_speed_severe = -0.50
         self.thirst_fatal_seconds = 3600
         self.walk_speed_base_multiplier = 1.0
         self.player_xuid_to_dehydrated_since = {}
@@ -108,6 +112,8 @@ class ARCRealisticSurvivalPlugin(Plugin):
         self.SPEED_FACTOR_NEUTRAL = 1.0
         self.SPEED_FACTOR_MIN = 0.01
         self.VANILLA_WALK_SPEED = 0.10
+        # 物品包效果防双触发：BP 脚本 /arseffect 与插件 consume 事件都可能触发
+        self._pack_effect_applied_at: dict[str, float] = {}
         # 创造/旁观时冻结真实生存数值；切回生存时恢复
         self._creative_snapshots = {}
         self.nutrition_manager = None
@@ -559,7 +565,9 @@ class ARCRealisticSurvivalPlugin(Plugin):
 
     def _cmd_apply_thirst_delta(self, sender, target, delta: float, quiet: bool = False) -> bool:
         try:
-            new_val = self._apply_thirst_delta(target, int(round(delta)), reason="command")
+            new_val = self._apply_thirst_delta(
+                target, int(round(delta)), reason="command", notify=not quiet
+            )
             self._persist_player_thirst(target)
             self._sync_creative_snap_thirst(target, new_val)
             if not quiet:
@@ -618,14 +626,22 @@ class ARCRealisticSurvivalPlugin(Plugin):
                 sender.send_message(
                     f"[ARS] 已净化 {target.name} 感染 -{removed:.0f}：{int(old)} → {int(new_val)}"
                 )
-            try:
-                target.send_toast("净化", f"感染值降低了 {int(removed)} 点。")
-            except Exception:
-                pass
+                try:
+                    target.send_toast("净化", f"感染值降低了 {int(removed)} 点。")
+                except Exception:
+                    pass
             return True
         except Exception as e:
             sender.send_message(f"[ARS] 净化失败: {e}")
             return False
+
+    def _pack_effect_recently_applied(self, target, item_id: str) -> bool:
+        key = f"{self._get_player_xuid(target)}|{normalize_item_id(item_id)}"
+        last = self._pack_effect_applied_at.get(key)
+        return last is not None and (time.time() - float(last)) < 2.0
+
+    def _mark_pack_effect_applied(self, target, item_id: str) -> None:
+        self._pack_effect_applied_at[f"{self._get_player_xuid(target)}|{normalize_item_id(item_id)}"] = time.time()
 
     def _cmd_apply_pack_effect(self, sender, target, item_id: str, quiet: bool = False) -> bool:
         effect = get_pack_effect(item_id)
@@ -633,6 +649,13 @@ class ARCRealisticSurvivalPlugin(Plugin):
             known = ", ".join(sorted(ARC_PACK_EFFECTS.keys()))
             sender.send_message(f"[ARS] 未知物品ID: {item_id}\n可用: {known}")
             return False
+        # BP /arseffect 与插件 consume 可能在同一口吃里都触发，2s 内只生效一次
+        if self._pack_effect_recently_applied(target, item_id):
+            self._log_consume_debug(
+                f"player={getattr(target, 'name', '?')} item={item_id} 已在 2s 内生效，跳过重复应用"
+            )
+            return True
+        self._mark_pack_effect_applied(target, item_id)
         label = effect.get("label") or item_id
         thirst = int(effect.get("thirst", 0) or 0)
         infection = int(effect.get("infection", 0) or 0)
@@ -640,8 +663,17 @@ class ARCRealisticSurvivalPlugin(Plugin):
         bits = []
 
         if thirst:
+            xuid = self._get_player_xuid(target)
+            old_thirst = int(self.player_xuid_to_thirst.get(xuid, self.thirst_initial))
             if self._cmd_apply_thirst_delta(sender, target, thirst, quiet=True):
-                bits.append(f"口渴{thirst:+d}")
+                new_thirst = int(self.player_xuid_to_thirst.get(xuid, self.thirst_initial))
+                gained = new_thirst - old_thirst
+                if gained > 0:
+                    bits.append(f"口渴+{gained}")
+                elif old_thirst >= self.thirst_max:
+                    bits.append("口渴已满")
+                else:
+                    bits.append(f"口渴{thirst:+d}")
         if any(v != 0 for v in nutri.values()):
             if self.nutrition_manager is None:
                 sender.send_message("[ARS] 营养系统未初始化")
@@ -665,8 +697,9 @@ class ARCRealisticSurvivalPlugin(Plugin):
         elif infection > 0:
             if self._is_infection_enabled() and self.zombie_virus_manager is not None:
                 try:
+                    # 物品效果链路不再单独弹感染 +x popup，统一由「服用了…」toast 反馈
                     new_val = self.zombie_virus_manager.apply_delta(
-                        target, float(infection), source_label=label
+                        target, float(infection), source_label=""
                     )
                     self._sync_creative_snap_infection(target, new_val)
                     bits.append(f"感染{infection:+d}")
@@ -1232,19 +1265,47 @@ class ARCRealisticSurvivalPlugin(Plugin):
             else:
                 self.thirst_consume_debug = str(val).strip().lower() in ("1", "true", "yes", "on")
 
-            val = self.setting_manager.GetSetting("thirst_speed_at_zero")
+            val = self.setting_manager.GetSetting("thirst_speed_bonus_threshold")
             if val is None or val == "":
-                self.setting_manager.SetSetting("thirst_speed_at_zero", "-0.55")
-                self.thirst_speed_at_zero = -0.55
+                self.setting_manager.SetSetting("thirst_speed_bonus_threshold", "80")
+                self.thirst_speed_bonus_threshold = 80
             else:
-                self.thirst_speed_at_zero = _as_float(val, -0.55)
+                self.thirst_speed_bonus_threshold = max(0, _as_int(val, 80))
 
-            val = self.setting_manager.GetSetting("thirst_speed_at_full")
+            val = self.setting_manager.GetSetting("thirst_speed_bonus")
             if val is None or val == "":
-                self.setting_manager.SetSetting("thirst_speed_at_full", "0.15")
-                self.thirst_speed_at_full = 0.15
+                self.setting_manager.SetSetting("thirst_speed_bonus", "0.20")
+                self.thirst_speed_bonus = 0.20
             else:
-                self.thirst_speed_at_full = _as_float(val, 0.15)
+                self.thirst_speed_bonus = _as_float(val, 0.20)
+
+            val = self.setting_manager.GetSetting("thirst_speed_slow_threshold")
+            if val is None or val == "":
+                self.setting_manager.SetSetting("thirst_speed_slow_threshold", "30")
+                self.thirst_speed_slow_threshold = 30
+            else:
+                self.thirst_speed_slow_threshold = max(0, _as_int(val, 30))
+
+            val = self.setting_manager.GetSetting("thirst_speed_slow")
+            if val is None or val == "":
+                self.setting_manager.SetSetting("thirst_speed_slow", "-0.20")
+                self.thirst_speed_slow = -0.20
+            else:
+                self.thirst_speed_slow = _as_float(val, -0.20)
+
+            val = self.setting_manager.GetSetting("thirst_speed_severe_threshold")
+            if val is None or val == "":
+                self.setting_manager.SetSetting("thirst_speed_severe_threshold", "15")
+                self.thirst_speed_severe_threshold = 15
+            else:
+                self.thirst_speed_severe_threshold = max(0, _as_int(val, 15))
+
+            val = self.setting_manager.GetSetting("thirst_speed_severe")
+            if val is None or val == "":
+                self.setting_manager.SetSetting("thirst_speed_severe", "-0.50")
+                self.thirst_speed_severe = -0.50
+            else:
+                self.thirst_speed_severe = _as_float(val, -0.50)
 
             val = self.setting_manager.GetSetting("thirst_fatal_seconds")
             if val is None or val == "":
@@ -1263,16 +1324,18 @@ class ARCRealisticSurvivalPlugin(Plugin):
             self._safe_log('error', f"[ARCRealisticSurvival] load thirst settings error: {e}")
 
     def _thirst_speed_amount(self, thirst: int) -> float:
-        """口渴 0→thirst_speed_at_zero，100→thirst_speed_at_full，线性映射；低于 0 按 0 算。"""
-        span = float(self.thirst_max - self.thirst_min) or 100.0
+        """口渴分段移速加成：>80 +20%；[30,80] 无；<30 -20%；<15 -50%。"""
         t = max(self.thirst_min, min(self.thirst_max, int(thirst)))
-        ratio = (t - self.thirst_min) / span
-        return float(self.thirst_speed_at_zero) + ratio * (
-            float(self.thirst_speed_at_full) - float(self.thirst_speed_at_zero)
-        )
+        if t < int(self.thirst_speed_severe_threshold):
+            return float(self.thirst_speed_severe)
+        if t < int(self.thirst_speed_slow_threshold):
+            return float(self.thirst_speed_slow)
+        if t > int(self.thirst_speed_bonus_threshold):
+            return float(self.thirst_speed_bonus)
+        return 0.0
 
     def _thirst_speed_factor(self, thirst: int) -> float:
-        """口渴对应的相对因子：1.0 + 线性加成；0→0.45（45%），100→1.15（115%）。"""
+        """口渴对应的相对因子：1.0 + 分段加成。"""
         factor = 1.0 + self._thirst_speed_amount(thirst)
         return max(float(self.SPEED_FACTOR_MIN), float(factor))
 
@@ -1640,17 +1703,18 @@ class ARCRealisticSurvivalPlugin(Plugin):
         except Exception as e:
             self._safe_log('error', f"[ARCRealisticSurvival] persist thirst error: {e}")
 
-    def _apply_thirst_delta(self, player, delta: int, reason: str = "") -> int:
+    def _apply_thirst_delta(self, player, delta: int, reason: str = "", notify: bool = True) -> int:
         if not self._is_survival_like(player):
             return int(self.player_xuid_to_thirst.get(self._get_player_xuid(player), self.thirst_initial))
         xuid = self._get_player_xuid(player)
         current = int(self.player_xuid_to_thirst.get(xuid, self.thirst_initial))
         new_val = self._clamp_thirst(current + delta)
         self.player_xuid_to_thirst[xuid] = new_val
-        # 仅当口渴度整数值确实变化时才提示
+        # 仅当口渴度整数值确实变化时才提示；物品效果链路 notify=False，由上层统一 toast
         if new_val != current:
-            msg = self.language_manager.GetText("THIRST_VALUE") or "当前口渴值: {value}"
-            player.send_popup(msg.replace("{value}", str(new_val)))
+            if notify:
+                msg = self.language_manager.GetText("THIRST_VALUE") or "当前口渴值: {value}"
+                player.send_popup(msg.replace("{value}", str(new_val)))
             self._push_sidebar_for_player(player)
         self._apply_thirst_movement_modifier(player)
         self._sync_dehydration_state(player)
@@ -1880,6 +1944,21 @@ class ARCRealisticSurvivalPlugin(Plugin):
                     f"identities={identity_list!r} matched_key={lookup_key!r} from={matched_src!r} "
                     f"has_cfg={cfg is not None}",
                 )
+
+            # ARC 物品包：不依赖 BP 调 /arseffect（脚本 runCommand 失败会导致不加口渴）
+            pack_id = None
+            for cand in identity_list:
+                if get_pack_effect(cand) is not None:
+                    pack_id = normalize_item_id(cand)
+                    break
+            if pack_id is not None:
+                self._log_consume_debug(
+                    f"player={player.name} hand={hand!r} identities={identity_list!r} "
+                    f"→ 命中 pack_effect id={pack_id}",
+                )
+                self._cmd_apply_pack_effect(player, player, pack_id, quiet=True)
+                self._persist_player_thirst(player)
+                return
 
             thirst_handled = False
             if cfg is not None:
