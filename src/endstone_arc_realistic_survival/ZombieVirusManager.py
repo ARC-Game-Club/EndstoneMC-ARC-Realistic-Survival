@@ -40,6 +40,8 @@ class ZombieVirusManager:
         self.player_infection: dict[str, float] = {}
         self.player_last_warn: dict[str, float] = {}
         self.infection_task = None
+        # 已进入「感染满值」阶段的玩家（只负责提示/刷丧尸一次；kill 每次检测都执行）
+        self._max_infection_active: set[str] = set()
 
         self.infection_enabled = False
         self.infection_tick_seconds = 12
@@ -50,7 +52,6 @@ class ZombieVirusManager:
         self.infection_warn_cooldown_seconds = 120
         self.infection_zombie_entity = "minecraft:zombie"
         self.infection_zombie_entities: list[str] = ["minecraft:zombie"]
-        self._transforming: set[str] = set()
 
     def load_settings(self) -> None:
         def _get_bool(key: str, default: str) -> bool:
@@ -230,19 +231,16 @@ class ZombieVirusManager:
         return self.player_infection[xuid]
 
     def persist_player(self, player) -> None:
+        """仅退出/关服/死亡/丧尸化等关键点调用；运行时数值只在内存。"""
         try:
             xuid = self._get_xuid(player)
             infection = self._clamp(float(self.player_infection.get(xuid, 0.0)))
-            exists = self.db_manager.query_one("SELECT xuid FROM player_infection WHERE xuid=?", (xuid,))
-            payload = {
+            self.db_manager.upsert("player_infection", {
+                "xuid": xuid,
                 "player_name": player.name,
                 "infection": infection,
                 "updated_at": datetime.datetime.utcnow().isoformat(),
-            }
-            if exists is None:
-                self.db_manager.insert("player_infection", {"xuid": xuid, **payload})
-            else:
-                self.db_manager.update("player_infection", payload, "xuid=?", (xuid,))
+            })
         except Exception as e:
             self._log("error", f"[ARS] persist infection error: {e}")
 
@@ -253,16 +251,12 @@ class ZombieVirusManager:
             if not xuid_s:
                 return
             infection = self._clamp(float(self.player_infection.get(xuid_s, 0.0)))
-            exists = self.db_manager.query_one("SELECT xuid FROM player_infection WHERE xuid=?", (xuid_s,))
-            payload = {
+            self.db_manager.upsert("player_infection", {
+                "xuid": xuid_s,
                 "player_name": str(player_name or "").strip(),
                 "infection": infection,
                 "updated_at": datetime.datetime.utcnow().isoformat(),
-            }
-            if exists is None:
-                self.db_manager.insert("player_infection", {"xuid": xuid_s, **payload})
-            else:
-                self.db_manager.update("player_infection", payload, "xuid=?", (xuid_s,))
+            })
         except Exception as e:
             self._log("error", f"[ARS] persist infection by xuid error: {e}")
 
@@ -275,9 +269,7 @@ class ZombieVirusManager:
         self.player_infection[xuid] = new_val
         self._notify_threshold_cross(player, old, new_val)
         if new_val >= self.infection_max:
-            self._trigger_zombie_transform(player)
-        else:
-            self.persist_player(player)
+            self._on_infection_max(player)
         try:
             self.plugin._push_sidebar_for_player(player)
         except Exception:
@@ -298,9 +290,7 @@ class ZombieVirusManager:
                 pass
         self._notify_threshold_cross(player, old, new_val)
         if new_val >= self.infection_max:
-            self._trigger_zombie_transform(player)
-        else:
-            self.persist_player(player)
+            self._on_infection_max(player)
         try:
             self.plugin._push_sidebar_for_player(player)
         except Exception:
@@ -335,89 +325,105 @@ class ZombieVirusManager:
                 player.send_message("[感染] 感染值已低于临界，正在缓慢恢复。")
         self._mark_warn(xuid)
 
-    def _trigger_zombie_transform(self, player) -> None:
-        """感染满值：先清零落库，再尝试击杀并刷丧尸；清零与是否杀死无关。"""
+    def _on_infection_max(self, player) -> None:
+        """感染满值：每次检测都 kill；不清零。首次提示并刷丧尸，清零只在死亡。"""
         if not self.infection_enabled:
             return
         xuid = self._get_xuid(player)
-        if xuid in self._transforming:
-            # 仍强制清零，防止残留
-            self.player_infection[xuid] = 0.0
-            try:
-                self.persist_player(player)
-            except Exception:
-                pass
-            return
-        self._transforming.add(xuid)
+        self.player_infection[xuid] = self.infection_max
 
-        # 1) 无条件清零并落库（最稳妥，不管后面杀没杀掉）
-        self.player_infection[xuid] = 0.0
-        try:
-            self.persist_player(player)
-        except Exception as e:
-            self._log("error", f"[ARS] persist infection clear on transform error: {e}")
+        if xuid not in self._max_infection_active:
+            self._max_infection_active.add(xuid)
+            try:
+                player.send_toast("丧尸化", "感染失控！你变成了丧尸…")
+            except Exception:
+                try:
+                    player.send_message("[感染] 感染失控！你变成了丧尸…")
+                except Exception:
+                    pass
+            self._spawn_zombie_at_player(player)
+
         try:
             self.plugin._push_sidebar_for_player(player)
         except Exception:
             pass
+        self._console_kill(player)
 
+    def _console_kill(self, player) -> None:
+        player_name = str(getattr(player, "name", "") or "").strip()
+        if not player_name:
+            return
+        try:
+            safe_name = player_name.replace('"', '\\"')
+            self.plugin.server.dispatch_command(
+                self.plugin.server.command_sender, f'kill "{safe_name}"'
+            )
+        except Exception as e:
+            self._log("error", f"[ARS] kill via dispatch_command error: {e}")
+
+    def _spawn_zombie_at_player(self, player) -> None:
         loc = None
         dimension = None
-        player_name = str(getattr(player, "name", "") or "").strip()
-        spawn_type = random.choice(self.infection_zombie_entities)
         try:
             loc = player.location
             dimension = getattr(loc, "dimension", None)
         except Exception as e:
             self._log("error", f"[ARS] read location on transform error: {e}")
-
+            return
+        if loc is None:
+            return
+        spawn_type = random.choice(self.infection_zombie_entities)
         try:
-            player.send_toast("丧尸化", "感染失控！你变成了丧尸…")
+            target_dim = dimension
+            if target_dim is None:
+                level = self.plugin.server.level
+                if level is not None:
+                    target_dim = level.get_dimension("overworld")
+            if target_dim is not None:
+                target_dim.spawn_actor(loc, spawn_type)
+        except Exception as e:
+            self._log("error", f"[ARS] spawn zombie after transform error: {e}")
+
+    def tick_growth_decay(self, player, growth_per_tick: float, decay_per_tick: float) -> None:
+        """统一定时器调用：按阈值增减感染值（满值不在这里处理）。"""
+        if not self.infection_enabled:
+            return
+        xuid = self._get_xuid(player)
+        if xuid not in self.player_infection:
+            self.load_player(player)
+        current = float(self.player_infection.get(xuid, 0.0))
+        if current <= 0:
+            return
+        if current >= self.infection_max:
+            return
+        if current >= self.infection_threshold:
+            new_val = self._clamp(current + growth_per_tick)
+        else:
+            new_val = self._clamp(current - decay_per_tick)
+        if abs(new_val - current) < 0.001:
+            return
+        self.player_infection[xuid] = new_val
+        self._notify_threshold_cross(player, current, new_val)
+        try:
+            self.plugin._push_sidebar_for_player(player)
         except Exception:
-            try:
-                player.send_message("[感染] 感染失控！你变成了丧尸…")
-            except Exception:
-                pass
+            pass
 
-        # 2) 控制台 kill；失败不影响已清零的感染值
-        try:
-            if player_name:
-                safe_name = player_name.replace('"', '\\"')
-                self.plugin.server.dispatch_command(
-                    self.plugin.server.command_sender, f'kill "{safe_name}"'
-                )
-        except Exception as e:
-            self._log("error", f"[ARS] kill via dispatch_command error: {e}")
-
-        def spawn_zombie():
-            try:
-                if loc is None:
-                    return
-                target_dim = dimension
-                if target_dim is None:
-                    level = self.plugin.server.level
-                    if level is not None:
-                        target_dim = level.get_dimension("overworld")
-                if target_dim is not None:
-                    target_dim.spawn_actor(loc, spawn_type)
-            except Exception as e:
-                self._log("error", f"[ARS] spawn zombie after transform error: {e}")
-            finally:
-                self._transforming.discard(xuid)
-                # 再保险清一次
-                self.player_infection[xuid] = 0.0
-                self.persist_by_xuid(xuid, player_name)
-
-        try:
-            self.plugin.server.scheduler.run_task(self.plugin, spawn_zombie, 5)
-        except Exception as e:
-            self._log("error", f"[ARS] schedule spawn zombie error: {e}")
-            self._transforming.discard(xuid)
+    def tick_max_infection(self, player) -> None:
+        """统一定时器每秒调用：满值则 kill（不清零）。"""
+        if not self.infection_enabled:
+            return
+        xuid = self._get_xuid(player)
+        if xuid not in self.player_infection:
+            self.load_player(player)
+        current = float(self.player_infection.get(xuid, 0.0))
+        if current >= self.infection_max:
+            self._on_infection_max(player)
 
     def reset_on_death(self, player) -> None:
-        """任意死亡：内存与数据库立刻清零感染。"""
+        """任意死亡：内存与数据库立刻清零感染，并退出满值阶段。"""
         xuid = self._get_xuid(player)
-        self._transforming.discard(xuid)
+        self._max_infection_active.discard(xuid)
         self.player_infection[xuid] = 0.0
         self.persist_player(player)
         try:
@@ -428,7 +434,7 @@ class ZombieVirusManager:
     def reset_on_respawn(self, player) -> None:
         """重生再强制清零落库，双保险。"""
         xuid = self._get_xuid(player)
-        self._transforming.discard(xuid)
+        self._max_infection_active.discard(xuid)
         self.player_infection[xuid] = 0.0
         self.persist_player(player)
         try:
@@ -461,7 +467,7 @@ class ZombieVirusManager:
         self.persist_player(player)
         xuid = self._get_xuid(player)
         self.player_infection.pop(xuid, None)
-        self._transforming.discard(xuid)
+        self._max_infection_active.discard(xuid)
 
     def on_actor_damage(self, event: ActorDamageEvent) -> None:
         if not self.infection_enabled:
@@ -501,59 +507,8 @@ class ZombieVirusManager:
             self._log("error", f"[ARS] infection damage handler error: {e}")
 
     def start_timer(self) -> None:
-        if self.infection_task is not None:
-            try:
-                self.infection_task.cancel()
-            except Exception:
-                pass
-            self.infection_task = None
-
-        period = max(6, int(self.infection_tick_seconds))
-        growth_per_tick = self.infection_growth_per_minute * (period / 60.0)
-        decay_per_tick = self.infection_decay_per_minute * (period / 60.0)
-
-        def tick():
-            try:
-                if not self.infection_enabled:
-                    return
-                for player in self.plugin.server.online_players:
-                    if player.game_mode != GameMode.SURVIVAL and player.game_mode != GameMode.ADVENTURE:
-                        continue
-                    xuid = self._get_xuid(player)
-                    if xuid not in self.player_infection:
-                        self.load_player(player)
-                    current = float(self.player_infection.get(xuid, 0.0))
-                    if current <= 0:
-                        continue
-                    if current >= self.infection_max:
-                        self._trigger_zombie_transform(player)
-                        continue
-                    threshold = self.infection_threshold
-                    if current >= threshold:
-                        new_val = self._clamp(current + growth_per_tick)
-                    elif current > 0:
-                        new_val = self._clamp(current - decay_per_tick)
-                    else:
-                        continue
-                    if abs(new_val - current) < 0.001:
-                        continue
-                    old = current
-                    self.player_infection[xuid] = new_val
-                    self._notify_threshold_cross(player, old, new_val)
-                    if new_val >= self.infection_max:
-                        self._trigger_zombie_transform(player)
-                    else:
-                        self.persist_player(player)
-                    try:
-                        self.plugin._push_sidebar_for_player(player)
-                    except Exception:
-                        pass
-            except Exception as e:
-                self._log("error", f"[ARS] infection timer error: {e}")
-
-        self.infection_task = self.plugin.server.scheduler.run_task(
-            self.plugin, tick, period * 20, period * 20
-        )
+        """由主插件 20-tick 统一定时器驱动；此处仅清理旧任务。"""
+        self.stop_timer()
 
     def stop_timer(self) -> None:
         if self.infection_task is not None:

@@ -1,6 +1,6 @@
 # ARC Realistic Survival - 真实生存插件
 [![Codacy Grade](https://app.codacy.com/project/badge/Grade/035827370d734c539602adbeca85f6d4)](https://app.codacy.com/gh/DEVILENMO/EndstoneMC-ARC-Realistic-Survival/dashboard?utm_source=gh&utm_medium=referral&utm_content=&utm_campaign=Badge_grade)
-[![Version](https://img.shields.io/badge/version-v0.3.32-blue)](https://github.com/DEVILENMO/EndstoneMC-ARC-Realistic-Survival)
+[![Version](https://img.shields.io/badge/version-v0.3.33-blue)](https://github.com/DEVILENMO/EndstoneMC-ARC-Realistic-Survival)
 
 
 一个为 Endstone 服务器打造的真实生存插件，添加口渴值、营养学、丧尸病毒、物品效果等功能，让生存体验更加真实有趣。
@@ -293,6 +293,13 @@ python -m build
 ```
 
 ## 📝 更新日志
+
+### v0.3.33
+- 口渴/营养/感染改为内存管理：定时衰减、吃药吃食物不再每 tick 写库；退出、关服、死亡等关键点再落库
+- 落库改为 `INSERT ... ON CONFLICT DO UPDATE`，不再先 SELECT
+- 三套定时器合并为统一 20-tick（1 秒）循环，仍按各自 `*_tick_seconds` 间隔衰减
+- 感染满值：每秒检测都执行 kill，不清零；死亡才清零；首次满值才提示并刷丧尸
+- 口渴移速仅在数值变化且因子分段变化时写入，不再每秒重挂
 
 ### v0.3.32
 - 口渴移速改为分段阈值：>80 +20%，30～80 无加成，<30 -20%，<15 -50%（原线性 45%～115%）

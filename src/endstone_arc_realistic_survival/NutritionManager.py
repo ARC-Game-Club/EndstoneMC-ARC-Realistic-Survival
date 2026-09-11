@@ -287,23 +287,19 @@ class NutritionManager:
         return data
 
     def persist_player(self, player) -> None:
+        """仅退出/关服/管理命令调用；运行时数值只在内存。"""
         try:
             xuid = self._get_xuid(player)
             data = self.player_nutrition.get(xuid, self._default_nutrition())
-            exists = self.db_manager.query_one("SELECT xuid FROM player_nutrition WHERE xuid=?", (xuid,))
-            payload = {
+            self.db_manager.upsert("player_nutrition", {
+                "xuid": xuid,
                 "player_name": player.name,
                 "vitamin_a": data["vitamin_a"],
                 "vitamin_c": data["vitamin_c"],
                 "iron": data["iron"],
                 "protein": data["protein"],
                 "updated_at": datetime.datetime.utcnow().isoformat(),
-            }
-            if exists is None:
-                payload = {"xuid": xuid, **payload}
-                self.db_manager.insert("player_nutrition", payload)
-            else:
-                self.db_manager.update("player_nutrition", payload, "xuid=?", (xuid,))
+            })
         except Exception as e:
             self._log("error", f"[ARS] persist nutrition error: {e}")
 
@@ -348,7 +344,6 @@ class NutritionManager:
         self.player_severity[xuid] = new_severity
         self._notify_severity_changes(player, old_severity, new_severity)
         self._apply_persistent_symptoms(player)
-        self.persist_player(player)
         try:
             self.plugin._push_sidebar_for_player(player)
         except Exception:
@@ -446,7 +441,6 @@ class NutritionManager:
         self.clear_symptoms(player)
         self._apply_persistent_symptoms(player)
         self._notify_severity_changes(player, old_severity, new_severity)
-        self.persist_player(player)
         try:
             self.plugin._push_sidebar_for_player(player)
         except Exception:
@@ -642,52 +636,39 @@ class NutritionManager:
             return False
         label = cfg.get("item_name") or lookup_key or "未知食物"
         self.apply_deltas(player, deltas, item_label=label)
-        self.persist_player(player)
         self._log(
             "info",
             f"[ARS][nutrition] player={player.name} item={label} deltas={deltas}",
         )
         return True
 
-    def start_timer(self) -> None:
-        if self.nutrition_task is not None:
+    def tick_decay_for_player(self, player) -> None:
+        """统一定时器调用：衰减营养并刷症状。"""
+        try:
+            xuid = self._get_xuid(player)
+            data = self.player_nutrition.get(xuid)
+            if data is None:
+                self.load_player(player)
+                data = self.player_nutrition.get(xuid, self._default_nutrition())
+            decay = self.nutrition_decay_per_tick
+            if decay > 0:
+                new_data = {k: self._clamp(data[k] - decay) for k in NUTRIENT_KEYS}
+                old_severity = dict(self.player_severity.get(xuid, {}))
+                self.player_nutrition[xuid] = new_data
+                new_severity = {k: self.get_severity(new_data[k]) for k in NUTRIENT_KEYS}
+                self.player_severity[xuid] = new_severity
+                self._notify_severity_changes(player, old_severity, new_severity)
+            self._tick_symptoms_for_player(player)
             try:
-                self.nutrition_task.cancel()
+                self.plugin._push_sidebar_for_player(player)
             except Exception:
                 pass
-            self.nutrition_task = None
+        except Exception as e:
+            self._log("error", f"[ARS] nutrition tick error: {e}")
 
-        period_seconds = max(30, int(self.nutrition_tick_seconds))
-
-        def tick():
-            try:
-                for player in self.plugin.server.online_players:
-                    if player.game_mode != GameMode.SURVIVAL and player.game_mode != GameMode.ADVENTURE:
-                        continue
-                    xuid = self._get_xuid(player)
-                    data = self.player_nutrition.get(xuid)
-                    if data is None:
-                        self.load_player(player)
-                        data = self.player_nutrition.get(xuid, self._default_nutrition())
-                    decay = self.nutrition_decay_per_tick
-                    if decay > 0:
-                        new_data = {k: self._clamp(data[k] - decay) for k in NUTRIENT_KEYS}
-                        old_severity = dict(self.player_severity.get(xuid, {}))
-                        self.player_nutrition[xuid] = new_data
-                        new_severity = {k: self.get_severity(new_data[k]) for k in NUTRIENT_KEYS}
-                        self.player_severity[xuid] = new_severity
-                        self._notify_severity_changes(player, old_severity, new_severity)
-                    self._tick_symptoms_for_player(player)
-                    self.persist_player(player)
-                    try:
-                        self.plugin._push_sidebar_for_player(player)
-                    except Exception:
-                        pass
-            except Exception as e:
-                self._log("error", f"[ARS] nutrition timer error: {e}")
-
-        scheduler = self.plugin.server.scheduler
-        self.nutrition_task = scheduler.run_task(self.plugin, tick, 20 * 5, period_seconds * 20)
+    def start_timer(self) -> None:
+        """由主插件 20-tick 统一定时器驱动；此处仅清理旧任务。"""
+        self.stop_timer()
 
     def stop_timer(self) -> None:
         if self.nutrition_task is not None:

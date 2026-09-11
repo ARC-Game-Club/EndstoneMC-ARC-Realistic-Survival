@@ -97,6 +97,10 @@ class ARCRealisticSurvivalPlugin(Plugin):
         self.thirst_items_map = {}
         self.thirst_consume_debug = False
         self.thirst_task = None
+        # 统一 20-tick 定时器：口渴/感染/营养共用
+        self._last_thirst_run = 0.0
+        self._last_infection_run = 0.0
+        self._last_nutrition_run = 0.0
         # 口渴移速分段：>80 +20%；[30,80] 无加成；<30 -20%；<15 -50%
         self.thirst_speed_bonus_threshold = 80
         self.thirst_speed_bonus = 0.20
@@ -223,13 +227,8 @@ class ARCRealisticSurvivalPlugin(Plugin):
         self._init_economy_plugin()
         # 向弧光核心注册真实生存侧边栏页面
         self._register_sidebar_page()
-        # 启动口渴值定时任务
-        self._start_thirst_timer()
-        # 启动营养学定时任务
-        if self.nutrition_manager is not None:
-            self.nutrition_manager.start_timer()
-        if self.zombie_virus_manager is not None:
-            self.zombie_virus_manager.start_timer()
+        # 统一 20-tick 定时器（口渴/感染/营养）
+        self._start_survival_timer()
         # 热重载时给已在线玩家补推侧边栏
         try:
             for online in list(self.server.online_players or []):
@@ -244,22 +243,18 @@ class ARCRealisticSurvivalPlugin(Plugin):
         except Exception:
             pass
 
-        # 关闭数据库连接
-        if hasattr(self, 'db_manager'):
-            self.db_manager.close()
-        # 停止口渴定时任务
+        # 停止统一定时任务
         if self.thirst_task is not None:
             try:
                 self.thirst_task.cancel()
             except Exception:
                 pass
             self.thirst_task = None
-        # 停止营养定时任务并保存
         if self.nutrition_manager is not None:
             self.nutrition_manager.stop_timer()
         if self.zombie_virus_manager is not None:
             self.zombie_virus_manager.stop_timer()
-        # 保存所有玩家口渴值、营养值与感染值
+        # 先把在线玩家数值写入数据库，再关连接
         try:
             for player in self.server.online_players:
                 self._persist_player_thirst(player)
@@ -270,6 +265,8 @@ class ARCRealisticSurvivalPlugin(Plugin):
                     self.zombie_virus_manager.persist_player(player)
         except Exception:
             pass
+        if hasattr(self, 'db_manager'):
+            self.db_manager.close()
 
     def _get_arc_core(self):
         """优先复用已探测的 arc_core，否则再向插件管理器查询。"""
@@ -568,7 +565,6 @@ class ARCRealisticSurvivalPlugin(Plugin):
             new_val = self._apply_thirst_delta(
                 target, int(round(delta)), reason="command", notify=not quiet
             )
-            self._persist_player_thirst(target)
             self._sync_creative_snap_thirst(target, new_val)
             if not quiet:
                 sender.send_message(
@@ -593,7 +589,6 @@ class ARCRealisticSurvivalPlugin(Plugin):
                 sender.send_message("[ARS] 营养素须为: vitamin_a, vitamin_c, iron, protein, all")
                 return False
             data = self.nutrition_manager.apply_deltas(target, deltas, item_label="command")
-            self.nutrition_manager.persist_player(target)
             self._sync_creative_snap_nutrition(target, data)
             if not quiet:
                 shown = ",".join(f"{k}{v:+d}" for k, v in deltas.items())
@@ -680,7 +675,6 @@ class ARCRealisticSurvivalPlugin(Plugin):
                 return False
             try:
                 data = self.nutrition_manager.apply_deltas(target, nutri, item_label=label)
-                self.nutrition_manager.persist_player(target)
                 self._sync_creative_snap_nutrition(target, data)
                 bits.extend(
                     f"{NUTRIENT_LABELS.get(k, k)}{v:+d}"
@@ -933,11 +927,11 @@ class ARCRealisticSurvivalPlugin(Plugin):
                 except Exception:
                     pass
                 self.thirst_task = None
-            self._start_thirst_timer()
             if self.nutrition_manager is not None:
-                self.nutrition_manager.start_timer()
+                self.nutrition_manager.stop_timer()
             if self.zombie_virus_manager is not None:
-                self.zombie_virus_manager.start_timer()
+                self.zombie_virus_manager.stop_timer()
+            self._start_survival_timer()
             # 感染开关可能变化，重挂侧边栏行模板并刷新在线玩家
             self._register_sidebar_page()
             try:
@@ -1683,23 +1677,18 @@ class ARCRealisticSurvivalPlugin(Plugin):
         return self.player_xuid_to_thirst[xuid]
 
     def _persist_player_thirst(self, player) -> None:
+        """仅退出/关服/死亡等关键点调用；运行时数值只在内存。"""
         try:
             xuid = self._get_player_xuid(player)
             thirst = int(self.player_xuid_to_thirst.get(xuid, self.thirst_initial))
             since = self.player_xuid_to_dehydrated_since.get(xuid)
-            exists = self.db_manager.query_one("SELECT xuid FROM player_thirst WHERE xuid=?", (xuid,))
-            data = {
+            self.db_manager.upsert("player_thirst", {
+                "xuid": xuid,
                 "player_name": player.name,
                 "thirst": thirst,
                 "dehydrated_since": float(since) if since is not None else None,
                 "updated_at": datetime.datetime.utcnow().isoformat()
-            }
-            if exists is None:
-                data_with_key = {"xuid": xuid}
-                data_with_key.update(data)
-                self.db_manager.insert("player_thirst", data_with_key)
-            else:
-                self.db_manager.update("player_thirst", data, "xuid=?", (xuid,))
+            })
         except Exception as e:
             self._safe_log('error', f"[ARCRealisticSurvival] persist thirst error: {e}")
 
@@ -1779,7 +1768,8 @@ class ARCRealisticSurvivalPlugin(Plugin):
         elif self.player_xuid_to_dehydrated_since.get(xuid) is not None:
             self.player_xuid_to_dehydrated_since[xuid] = None
 
-    def _start_thirst_timer(self) -> None:
+    def _start_survival_timer(self) -> None:
+        """统一 20-tick（1 秒）定时器：口渴衰减、感染增减/满值 kill、营养衰减。"""
         try:
             if self.thirst_task is not None:
                 try:
@@ -1787,48 +1777,90 @@ class ARCRealisticSurvivalPlugin(Plugin):
                 except Exception:
                     pass
                 self.thirst_task = None
-            period_seconds = max(1, int(self.thirst_tick_seconds))
+            now = time.time()
+            self._last_thirst_run = now
+            self._last_infection_run = now
+            self._last_nutrition_run = now
 
             def tick():
                 try:
+                    now_ts = time.time()
+                    do_thirst = (now_ts - self._last_thirst_run) >= max(1, int(self.thirst_tick_seconds))
+                    do_infection = (
+                        self._is_infection_enabled()
+                        and (now_ts - self._last_infection_run) >= max(1, int(
+                            getattr(self.zombie_virus_manager, "infection_tick_seconds", 12)
+                        ))
+                    )
+                    do_nutrition = (
+                        self.nutrition_manager is not None
+                        and (now_ts - self._last_nutrition_run) >= max(1, int(
+                            getattr(self.nutrition_manager, "nutrition_tick_seconds", 30)
+                        ))
+                    )
+                    if do_thirst:
+                        self._last_thirst_run = now_ts
+                    if do_infection:
+                        self._last_infection_run = now_ts
+                    if do_nutrition:
+                        self._last_nutrition_run = now_ts
+
+                    infection_period = max(
+                        1.0,
+                        float(getattr(self.zombie_virus_manager, "infection_tick_seconds", 12) or 12),
+                    )
+                    growth = float(
+                        getattr(self.zombie_virus_manager, "infection_growth_per_minute", 0) or 0
+                    ) * (infection_period / 60.0)
+                    decay = float(
+                        getattr(self.zombie_virus_manager, "infection_decay_per_minute", 0) or 0
+                    ) * (infection_period / 60.0)
+
                     for player in self.server.online_players:
                         if player.game_mode != GameMode.SURVIVAL and player.game_mode != GameMode.ADVENTURE:
                             continue
                         xuid = self._get_player_xuid(player)
-                        current_thirst = int(
-                            self.player_xuid_to_thirst.get(xuid, self.thirst_initial)
-                        )
-                        if current_thirst <= 0:
-                            self._sync_dehydration_state(player)
-                        else:
-                            base_decay = self.thirst_decay_per_tick
-                            # 移动状态由最近移动事件标记
-                            moving_flag = getattr(player, '_arc_moving_flag', False)
-                            decay = base_decay if not moving_flag else int(
-                                math.ceil(base_decay * self.thirst_moving_multiplier)
+                        if do_thirst:
+                            current_thirst = int(
+                                self.player_xuid_to_thirst.get(xuid, self.thirst_initial)
                             )
-                            if decay > 0:
-                                self._apply_thirst_delta(player, -decay, reason="timer")
-                            else:
+                            if current_thirst <= 0:
                                 self._sync_dehydration_state(player)
-                        # 口渴未变时也重挂移速，避免 transient modifier 丢失后「0 口渴仍健步如飞」
-                        self._apply_thirst_movement_modifier(player)
-                        # 每次循环后重置移动标记
-                        if hasattr(player, '_arc_moving_flag'):
-                            try:
-                                delattr(player, '_arc_moving_flag')
-                            except Exception:
-                                pass
-                        # 定期保存
-                        self._persist_player_thirst(player)
+                            else:
+                                base_decay = self.thirst_decay_per_tick
+                                moving_flag = getattr(player, '_arc_moving_flag', False)
+                                tick_decay = base_decay if not moving_flag else int(
+                                    math.ceil(base_decay * self.thirst_moving_multiplier)
+                                )
+                                if tick_decay > 0:
+                                    # 仅在口渴数值变化时重算移速（同段位因子不变则 _set_speed_factor 直接跳过）
+                                    self._apply_thirst_delta(player, -tick_decay, reason="timer")
+                                else:
+                                    self._sync_dehydration_state(player)
+                            if hasattr(player, '_arc_moving_flag'):
+                                try:
+                                    delattr(player, '_arc_moving_flag')
+                                except Exception:
+                                    pass
+                        # 口渴为 0 时每秒检查脱水致死（不重挂移速）
+                        if int(self.player_xuid_to_thirst.get(xuid, self.thirst_initial)) <= 0:
+                            self._sync_dehydration_state(player)
+
+                        if self._is_infection_enabled() and self.zombie_virus_manager is not None:
+                            if do_infection:
+                                self.zombie_virus_manager.tick_growth_decay(player, growth, decay)
+                            # 满值每秒检测：每次都 kill，死亡才清零
+                            self.zombie_virus_manager.tick_max_infection(player)
+
+                        if do_nutrition and self.nutrition_manager is not None:
+                            self.nutrition_manager.tick_decay_for_player(player)
                 except Exception as e:
-                    self._safe_log('error', f"[ARCRealisticSurvival] thirst timer error: {e}")
+                    self._safe_log('error', f"[ARCRealisticSurvival] survival timer error: {e}")
 
             scheduler = self.server.scheduler
-            # delay 与 period 单位均为 tick（20 tick = 1 秒）
-            self.thirst_task = scheduler.run_task(self, tick, 20, period_seconds * 20)
+            self.thirst_task = scheduler.run_task(self, tick, 20, 20)
         except Exception as e:
-            self._safe_log('error', f"[ARCRealisticSurvival] start thirst timer error: {e}")
+            self._safe_log('error', f"[ARCRealisticSurvival] start survival timer error: {e}")
 
     # 生存-口渴系统：事件
     @event_handler()
@@ -1957,7 +1989,6 @@ class ARCRealisticSurvivalPlugin(Plugin):
                     f"→ 命中 pack_effect id={pack_id}",
                 )
                 self._cmd_apply_pack_effect(player, player, pack_id, quiet=True)
-                self._persist_player_thirst(player)
                 return
 
             thirst_handled = False
@@ -1981,8 +2012,6 @@ class ARCRealisticSurvivalPlugin(Plugin):
                     f"→ 未匹配 thirst_items / nutrition_items",
                 )
                 return
-
-            self._persist_player_thirst(player)
         except Exception as e:
             self._safe_log('error', f"[ARS] consume event error: {e}")
 

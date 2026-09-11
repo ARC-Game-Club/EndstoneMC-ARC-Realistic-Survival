@@ -95,6 +95,20 @@ class DatabaseManager:
         sql = f"INSERT INTO {table} ({fields}) VALUES ({placeholders})"
         return self.execute(sql, tuple(data.values()))
 
+    def upsert(self, table: str, data: Dict[str, Any], conflict_column: str = "xuid") -> bool:
+        """INSERT ... ON CONFLICT DO UPDATE，一次写入，不先 SELECT。"""
+        if not data or conflict_column not in data:
+            return False
+        fields = list(data.keys())
+        placeholders = ','.join(['?' for _ in fields])
+        update_cols = [k for k in fields if k != conflict_column]
+        set_clause = ','.join([f"{k}=excluded.{k}" for k in update_cols])
+        sql = (
+            f"INSERT INTO {table} ({','.join(fields)}) VALUES ({placeholders}) "
+            f"ON CONFLICT({conflict_column}) DO UPDATE SET {set_clause}"
+        )
+        return self.execute(sql, tuple(data.values()))
+
     def update(self, table: str, data: Dict[str, Any], where: str, params: tuple = ()) -> bool:
         """
         更新数据
