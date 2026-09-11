@@ -1,9 +1,9 @@
 # ARC Realistic Survival - 真实生存插件
 [![Codacy Grade](https://app.codacy.com/project/badge/Grade/035827370d734c539602adbeca85f6d4)](https://app.codacy.com/gh/DEVILENMO/EndstoneMC-ARC-Realistic-Survival/dashboard?utm_source=gh&utm_medium=referral&utm_content=&utm_campaign=Badge_grade)
-[![Version](https://img.shields.io/badge/version-v0.3.33-blue)](https://github.com/DEVILENMO/EndstoneMC-ARC-Realistic-Survival)
+[![Version](https://img.shields.io/badge/version-v0.4.0-blue)](https://github.com/DEVILENMO/EndstoneMC-ARC-Realistic-Survival)
 
 
-一个为 Endstone 服务器打造的真实生存插件，添加口渴值、营养学、丧尸病毒、物品效果等功能，让生存体验更加真实有趣。
+一个为 Endstone 服务器打造的真实生存插件，添加口渴值、营养学、丧尸病毒、统一进食效果等功能，让生存体验更加真实有趣。
 
 ## ✨ 功能特性
 
@@ -21,7 +21,7 @@
 - **四种营养素**：维生素 A、维生素 C、铁、蛋白质，各自独立 0-100 数值
 - **缺素病症**：长期偏食触发夜盲症、坏血病、贫血、肌无力
 - **症状分级**：健康 / 轻症 / 中症 / 重症，仅在等级变化时 Toast 提示
-- **食物绑定**：每种食物可配置四种营养素加成（SQLite `nutrition_items` 表）
+- **食物绑定**：每种食物的口渴/营养/感染增量统一在 SQLite `consume_items` 表配置（见「进食效果配置」）
 - **原生 API**：通过 Endstone `Effect` 与 `AttributeModifier` 实现减益，不污染实体 NBT
 
 ### 🧟 丧尸病毒系统
@@ -37,11 +37,12 @@
 - 数值变化、进服、创造旁路切换时自动推送；需弧光核心 **v0.9.0+**
 - 玩家可用 `/sidebar next` 翻到该页（页面数 ≥ 2 时也会自动轮播）
 
-### 🍺 物品效果系统
-- **自定义物品效果**：通过配置文件自定义任意物品的效果
-- **口渴值变化**：消耗物品可以增加或减少口渴值
-- **药水效果**：支持给予玩家药水效果（速度、力量等）
-- **效果持续时间**：可配置效果持续时间
+### 🍺 进食效果配置（v0.4.0 统一）
+- **单表配置**：所有食物/饮品的进食效果集中在 SQLite `consume_items` 表，一行配齐
+  `thirst_delta`（口渴）、`vitamin_a/vitamin_c/iron/protein`（营养）、`infection_delta`（感染，负数为净化）、`buffs`（药水效果 JSON）、`show_toast`（是否弹「服用了…」提示）
+- **单一订阅**：插件在 `PlayerItemConsumeEvent` 一个入口按表生效；行为包脚本不再调用 `/arseffect` 指令
+- **自动迁移**：首次加载自动把内置默认（ARC 物品包目录 + 原版食物营养）与旧 `thirst_items` / `nutrition_items` 表补齐进 `consume_items`；表内已有行不会被覆盖，改成 0 即关闭（删除会被自动补回）
+- **管理测试入口**：`/arseffect <玩家> <物品ID>` 仍可手动施加同一份配置；`/ars reload` 热重载
 
 ### ⚙️ 配置管理
 - **游戏内配置面板**：使用 `/ars` 命令打开可视化配置界面
@@ -132,22 +133,22 @@ infection_zombie_entities: zombie:zombie,zombie:zombie_runner,...  # 逗号分�
 
 症状阈值：健康 ≥60，轻症 30-59，中症 10-29，重症 <10。
 
-食物营养与口渴配置存储在 SQLite 表 `nutrition_items` / `thirst_items`。丧尸服可用 `scripts/seed_zombie_server_food.py` 批量写入 sgs_farm 模组与原版食物。
+进食的营养/口渴/感染增量统一见下方「进食效果配置 (consume_items)」。
 
-### 物品效果配置 (thirst_items)
+### 进食效果配置 (consume_items)
 
-在 `ARCRealisticSurvival/thirst_items.txt` 中配置物品效果：
+所有食物/饮品的进食效果统一存储在 SQLite 表 `consume_items`（首次启动自动补齐内置默认并迁移旧表）：
 
-```text
-# 格式：物品ID|口渴值变动|效果名称|持续时间（秒）
-# 效果名称和持续时间可选
+| 字段 | 含义 |
+|------|------|
+| `item_id` | 物品 ID（支持完整 `arc:bottled_water` 或短名匹配） |
+| `thirst_delta` | 口渴值增量 |
+| `vitamin_a` / `vitamin_c` / `iron` / `protein` | 四项营养增量 |
+| `infection_delta` | 感染增量（负数为净化） |
+| `buffs` | 药水效果 JSON，如 `[{"name":"speed","duration":30,"amplifier":1}]` |
+| `show_toast` | 是否弹「服用了…」提示（内置 arc 物品为 1，原版食物为 0） |
 
-# 示例：
-COOKED_BEEF|-10                    # 熟牛肉减少10点口渴值
-WATER_BOTTLE|50                    # 水瓶增加50点口渴值
-COLA|50|SPEED|30                   # 可乐增加50口渴值并给予30秒速度效果
-ENERGY_DRINK|40|STRENGTH|60        # 能量饮料增加40口渴值并给予60秒力量效果
-```
+表内已有行不会被覆盖：改数值直接改表，想关闭某项**设 0**（删行会被自动补回）。改完 `/ars reload` 热重载。丧尸服可用 `scripts/seed_zombie_server_food.py` 批量写入 sgs_farm 模组与原版食物。
 
 ### 语言文件
 
@@ -171,19 +172,15 @@ ENERGY_DRINK|40|STRENGTH|60        # 能量饮料增加40口渴值并给予60秒
 | `/purify <玩家> <数量>` | 自身 / OP | 净化感染：感染值减少指定数量 |
 | `/thirstadd <玩家> <增量>` | 自身 / OP | **物品模组对接**：增减口渴值 |
 | `/nutriadd <玩家> <营养素\|all> <增量>` | 自身 / OP | **物品模组对接**：增减营养（`vitamin_a` / `vitamin_c` / `iron` / `protein` / `all`） |
-| `/arseffect <玩家> <物品ID>` | 自身 / OP | **物品模组主入口**：按内置目录一次性施加口渴/营养/净化 |
+| `/arseffect <玩家> <物品ID>` | 自身 / OP | **管理测试入口**：按统一进食效果配置（`consume_items`）施加口渴/营养/感染 |
 
 > 普通玩家仅能对**自己**使用 `/thirstadd`、`/nutriadd`、`/purify`、`/arseffect`；改他人需 OP。权限节点：`arc_realistic_survival.command.item`（默认允许）。
 
 ### 与 ARC 真实生存物品包对接
 
-行为包消耗药品/饮水后会执行：
+**v0.4.0 起行为包不再调用指令**：玩家进食/饮水后，插件在 `PlayerItemConsumeEvent` 中按 `consume_items` 表自动生效（水瓶的装水、退空瓶仍由行为包脚本处理）。
 
-```text
-/arseffect <玩家名> arc:bottled_water
-```
-
-插件内置目录（`pack_effects.py`）示例：
+内置默认目录（`pack_effects.py`，首次启动播种进 `consume_items`，可在表中修改）示例：
 
 | 物品 ID | 效果 |
 |---------|------|
@@ -222,13 +219,13 @@ ENERGY_DRINK|40|STRENGTH|60        # 能量饮料增加40口渴值并给予60秒
    - 口渴值会实时显示在屏幕上
    - **死亡重置**为初始口渴值
 
-3. **物品效果**：
-   - 消耗特定物品可获得临时增益效果
+3. **进食效果**：
+   - 进食/饮水按 `consume_items` 表一次性应用口渴、营养、感染与药水 buffs
    - 支持所有原版药水效果（通过 Endstone 原生 `Effect` API）
 
 4. **营养学**：
    - 默认每 5 分钟四种营养素各 -1
-   - 进食匹配 `nutrition_items` 的食物可补充对应营养
+   - 进食匹配 `consume_items` 表的食物可补充对应营养
    - 使用 `/ars nutrition` 查看当前状态与食物营养表
    - **死亡不重置**，重生后按存档数值恢复缺素症状
 
@@ -247,7 +244,7 @@ ENERGY_DRINK|40|STRENGTH|60        # 能量饮料增加40口渴值并给予60秒
   - 玩家口渴值
   - 玩家四种营养素数值
   - 玩家感染值
-  - 口渴/营养/感染物品与来源配置表
+  - 进食效果配置表（`consume_items`）与感染源配置表（`infection_sources`）
   - 最后更新时间
   - 玩家名称
 
@@ -276,7 +273,9 @@ src/endstone_arc_realistic_survival/
 ├── arc_realistic_survival.py # 主插件逻辑
 ├── NutritionManager.py      # 营养学系统
 ├── ZombieVirusManager.py    # 丧尸病毒系统
-├── pack_effects.py          # ARC 物品包效果目录（/arseffect）
+├── ConsumeEffectManager.py  # 统一进食效果配置（consume_items 表）
+├── effect_compat.py         # 药水效果 API 兼容层（0.10/0.11）
+├── pack_effects.py          # ARC 物品包内置默认效果目录（喂给 ConsumeEffectManager）
 ├── DatabaseManager.py       # 数据库管理器
 ├── LanguageManager.py       # 语言管理器
 └── SettingManager.py        # 设置管理器
@@ -293,6 +292,14 @@ python -m build
 ```
 
 ## 📝 更新日志
+
+### v0.4.0
+- **统一进食效果配置**：新增 `consume_items` 单表（口渴/四项营养/感染/buffs/show_toast 一行配齐），`PlayerItemConsumeEvent` 单一订阅点生效
+- 移除三套旧进食配置的独立链路：`thirst_items` 表、`nutrition_items` 表、`pack_effects.py` 内置目录（目录保留为内置默认来源）
+- 首次加载自动迁移：内置默认 + 旧 `thirst_items` / `nutrition_items` 自定义行补齐进 `consume_items`；表内已有行不覆盖，设 0 即关闭
+- 行为包脚本不再调用 `/arseffect`：只保留空瓶装水与喝完退空瓶；`/arseffect` 保留为管理测试入口（读同一张表）
+- 播种脚本 `seed_zombie_server_food.py` 改写 `consume_items`；新增离线冒烟测试 `scripts/smoke_test_consume.py`
+- 主插件精简约 450 行，NutritionManager 不再负责物品匹配
 
 ### v0.3.33
 - 口渴/营养/感染改为内存管理：定时衰减、吃药吃食物不再每 tick 写库；退出、关服、死亡等关键点再落库

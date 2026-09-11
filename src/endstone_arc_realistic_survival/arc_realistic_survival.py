@@ -10,13 +10,14 @@ from endstone.event import event_handler, PlayerItemConsumeEvent, PlayerMoveEven
 from endstone.plugin import Plugin
 from endstone.form import ActionForm, ModalForm, Label, TextInput
 
+from .ConsumeEffectManager import ConsumeEffectManager
 from .DatabaseManager import DatabaseManager
 from .LanguageManager import LanguageManager
-from .NutritionManager import NUTRIENT_KEYS, NUTRIENT_LABELS, NutritionManager
+from .NutritionManager import NUTRIENT_KEYS, NutritionManager
 from .SettingManager import SettingManager
 from .ZombieVirusManager import ZombieVirusManager
 from .effect_compat import apply_mob_effect, resolve_effect_type
-from .pack_effects import ARC_PACK_EFFECTS, get_pack_effect, normalize_item_id
+from .pack_effects import normalize_item_id
 
 
 class ARCRealisticSurvivalPlugin(Plugin):
@@ -58,7 +59,7 @@ class ARCRealisticSurvivalPlugin(Plugin):
             "permissions": ["arc_realistic_survival.command.item"],
         },
         "arseffect": {
-            "description": "按 ARC 物品包目录一次性施加口渴/营养/净化（物品模组主入口）",
+            "description": "按统一进食效果配置（consume_items 表）施加口渴/营养/感染；管理测试入口",
             "usages": ["/arseffect <player: player> <item_id: str>"],
             "permissions": ["arc_realistic_survival.command.item"],
         },
@@ -94,7 +95,6 @@ class ARCRealisticSurvivalPlugin(Plugin):
         self.thirst_initial = 100
         self.thirst_min = 0
         self.thirst_max = 100
-        self.thirst_items_map = {}
         self.thirst_consume_debug = False
         self.thirst_task = None
         # 统一 20-tick 定时器：口渴/感染/营养共用
@@ -116,8 +116,8 @@ class ARCRealisticSurvivalPlugin(Plugin):
         self.SPEED_FACTOR_NEUTRAL = 1.0
         self.SPEED_FACTOR_MIN = 0.01
         self.VANILLA_WALK_SPEED = 0.10
-        # 物品包效果防双触发：BP 脚本 /arseffect 与插件 consume 事件都可能触发
-        self._pack_effect_applied_at: dict[str, float] = {}
+        # 统一进食效果配置（consume_items 表：口渴/营养/感染/buffs 一行配齐）
+        self.consume_manager = None
         # 创造/旁观时冻结真实生存数值；切回生存时恢复
         self._creative_snapshots = {}
         self.nutrition_manager = None
@@ -198,7 +198,6 @@ class ARCRealisticSurvivalPlugin(Plugin):
         )
         self.nutrition_manager.ensure_tables()
         self.nutrition_manager.load_settings()
-        self.nutrition_manager.load_items_config()
         # 初始化丧尸病毒管理器
         self.zombie_virus_manager = ZombieVirusManager(
             self,
@@ -210,9 +209,18 @@ class ARCRealisticSurvivalPlugin(Plugin):
         self.zombie_virus_manager.ensure_tables()
         self.zombie_virus_manager.load_settings()
         self.zombie_virus_manager.load_sources_config()
+        # 初始化统一进食效果管理器（口渴/营养/感染单表配置）
+        self.consume_manager = ConsumeEffectManager(
+            self,
+            self.db_manager,
+            self._safe_log,
+            self._get_player_xuid,
+            self._collect_item_identity_strings,
+        )
+        self.consume_manager.ensure_tables()
+        self.consume_manager.load_items_config()
         # 加载生存-口渴系统配置
         self._load_thirst_settings()
-        self._load_thirst_items_config()
 
     def on_enable(self) -> None:
         self._safe_log('info', "[ARCRealisticSurvival] on_enable is called!")
@@ -630,89 +638,6 @@ class ARCRealisticSurvivalPlugin(Plugin):
             sender.send_message(f"[ARS] 净化失败: {e}")
             return False
 
-    def _pack_effect_recently_applied(self, target, item_id: str) -> bool:
-        key = f"{self._get_player_xuid(target)}|{normalize_item_id(item_id)}"
-        last = self._pack_effect_applied_at.get(key)
-        return last is not None and (time.time() - float(last)) < 2.0
-
-    def _mark_pack_effect_applied(self, target, item_id: str) -> None:
-        self._pack_effect_applied_at[f"{self._get_player_xuid(target)}|{normalize_item_id(item_id)}"] = time.time()
-
-    def _cmd_apply_pack_effect(self, sender, target, item_id: str, quiet: bool = False) -> bool:
-        effect = get_pack_effect(item_id)
-        if effect is None:
-            known = ", ".join(sorted(ARC_PACK_EFFECTS.keys()))
-            sender.send_message(f"[ARS] 未知物品ID: {item_id}\n可用: {known}")
-            return False
-        # BP /arseffect 与插件 consume 可能在同一口吃里都触发，2s 内只生效一次
-        if self._pack_effect_recently_applied(target, item_id):
-            self._log_consume_debug(
-                f"player={getattr(target, 'name', '?')} item={item_id} 已在 2s 内生效，跳过重复应用"
-            )
-            return True
-        self._mark_pack_effect_applied(target, item_id)
-        label = effect.get("label") or item_id
-        thirst = int(effect.get("thirst", 0) or 0)
-        infection = int(effect.get("infection", 0) or 0)
-        nutri = {k: int(effect.get(k, 0) or 0) for k in NUTRIENT_KEYS}
-        bits = []
-
-        if thirst:
-            xuid = self._get_player_xuid(target)
-            old_thirst = int(self.player_xuid_to_thirst.get(xuid, self.thirst_initial))
-            if self._cmd_apply_thirst_delta(sender, target, thirst, quiet=True):
-                new_thirst = int(self.player_xuid_to_thirst.get(xuid, self.thirst_initial))
-                gained = new_thirst - old_thirst
-                if gained > 0:
-                    bits.append(f"口渴+{gained}")
-                elif old_thirst >= self.thirst_max:
-                    bits.append("口渴已满")
-                else:
-                    bits.append(f"口渴{thirst:+d}")
-        if any(v != 0 for v in nutri.values()):
-            if self.nutrition_manager is None:
-                sender.send_message("[ARS] 营养系统未初始化")
-                return False
-            try:
-                data = self.nutrition_manager.apply_deltas(target, nutri, item_label=label)
-                self._sync_creative_snap_nutrition(target, data)
-                bits.extend(
-                    f"{NUTRIENT_LABELS.get(k, k)}{v:+d}"
-                    for k, v in nutri.items()
-                    if v
-                )
-            except Exception as e:
-                sender.send_message(f"[ARS] 营养调整失败: {e}")
-                return False
-        if infection < 0:
-            # infection 存的是负增量，净化量为正
-            if self._cmd_apply_purify(sender, target, abs(infection), quiet=True):
-                bits.append(f"感染{infection:+d}")
-        elif infection > 0:
-            if self._is_infection_enabled() and self.zombie_virus_manager is not None:
-                try:
-                    # 物品效果链路不再单独弹感染 +x popup，统一由「服用了…」toast 反馈
-                    new_val = self.zombie_virus_manager.apply_delta(
-                        target, float(infection), source_label=""
-                    )
-                    self._sync_creative_snap_infection(target, new_val)
-                    bits.append(f"感染{infection:+d}")
-                except Exception as e:
-                    sender.send_message(f"[ARS] 感染调整失败: {e}")
-                    return False
-
-        if not quiet:
-            detail = " ".join(bits) if bits else "无变化"
-            sender.send_message(f"[ARS] {label} → {target.name}: {detail}")
-        try:
-            # 第一行：服用了xxx；第二行：维生素A+30 铁+14 …
-            toast_title = f"服用了{label}"
-            toast_body = " ".join(bits) if bits else "已生效"
-            target.send_toast(toast_title, toast_body)
-        except Exception:
-            pass
-        return True
-
     def on_command(self, sender: CommandSender, command: Command, args: list[str]) -> bool:
         match command.name:
             case "heal":
@@ -814,8 +739,26 @@ class ARCRealisticSurvivalPlugin(Plugin):
                 if not self._can_item_affect(sender, target):
                     sender.send_message(self.language_manager.GetText("NO_PERMISSION") or "No permission")
                     return True
+                if self.consume_manager is None:
+                    sender.send_message("[ARS] 进食效果系统未初始化")
+                    return True
                 item_id = normalize_item_id(" ".join(args[1:]))
-                self._cmd_apply_pack_effect(sender, target, item_id)
+                status, label, bits = self.consume_manager.apply_by_id(target, item_id)
+                if status == "unknown":
+                    known = ", ".join(self.consume_manager.known_item_ids())
+                    sender.send_message(f"[ARS] 未知物品ID: {item_id}\n可用: {known}")
+                    return True
+                if status == "deduped":
+                    self._log_consume_debug(
+                        f"player={target.name} item={item_id} 已在 2s 内生效，跳过重复应用"
+                    )
+                    return True
+                detail = " ".join(bits) if bits else "无变化"
+                sender.send_message(f"[ARS] {label} → {target.name}: {detail}")
+                try:
+                    target.send_toast(f"服用了{label}", detail if bits else "已生效")
+                except Exception:
+                    pass
                 return True
 
             case "ars":
@@ -914,10 +857,10 @@ class ARCRealisticSurvivalPlugin(Plugin):
         # 重新加载配置与物品效果，并重启定时器
         try:
             self._load_thirst_settings()
-            self._load_thirst_items_config()
+            if self.consume_manager is not None:
+                self.consume_manager.load_items_config()
             if self.nutrition_manager is not None:
                 self.nutrition_manager.load_settings()
-                self.nutrition_manager.load_items_config()
             if self.zombie_virus_manager is not None:
                 self.zombie_virus_manager.load_settings()
                 self.zombie_virus_manager.load_sources_config()
@@ -1144,7 +1087,11 @@ class ARCRealisticSurvivalPlugin(Plugin):
                 player.send_message("[ARS] 营养系统未初始化")
                 return
             status_lines = self.nutrition_manager.get_status_lines(player)
-            catalog_lines = self.nutrition_manager.get_food_catalog_lines(limit=15)
+            catalog_lines = (
+                self.consume_manager.get_catalog_lines(limit=15)
+                if self.consume_manager is not None
+                else []
+            )
             body = "\n".join(status_lines + [""] + catalog_lines)
             form = ActionForm(
                 title="营养学",
@@ -1197,18 +1144,6 @@ class ARCRealisticSurvivalPlugin(Plugin):
             self._safe_log('error', "[ARCRealisticSurvival] Failed to create player_thirst table")
         if not self.db_manager.ensure_column("player_thirst", "dehydrated_since", "REAL"):
             self._safe_log('warning', "[ARCRealisticSurvival] failed to add player_thirst.dehydrated_since")
-
-        thirst_items_fields = {
-            "id": "INTEGER PRIMARY KEY AUTOINCREMENT",
-            "item_id": "TEXT NOT NULL UNIQUE",
-            "item_name": "TEXT",
-            "thirst_delta": "INTEGER NOT NULL DEFAULT 0",
-            "buffs": "TEXT",
-            "created_at": "TEXT",
-            "updated_at": "TEXT",
-        }
-        if self.db_manager.create_table("thirst_items", thirst_items_fields):
-            self._safe_log('info', "[ARCRealisticSurvival] thirst_items table ready")
 
     def _load_thirst_settings(self) -> None:
         def _as_int(raw, default: int) -> int:
@@ -1428,17 +1363,6 @@ class ARCRealisticSurvivalPlugin(Plugin):
         except Exception:
             pass
 
-    def _register_thirst_item_cfg(self, item_id: str, cfg: dict) -> None:
-        """同一物品写入完整命名空间键与短 id（: 后一段），便于匹配 item.type 的多种格式。"""
-        raw = str(item_id).strip()
-        if not raw:
-            return
-        upper_full = raw.upper()
-        self.thirst_items_map[upper_full] = cfg
-        if ":" in upper_full:
-            short_key = upper_full.split(":", 1)[1]
-            self.thirst_items_map[short_key] = cfg
-
     def _collect_item_identity_strings(self, item) -> list[str]:
         """从 ItemStack 收集可能用于匹配的字符串（去重、保序）。"""
         candidates = []
@@ -1465,63 +1389,6 @@ class ARCRealisticSurvivalPlugin(Plugin):
             pass
         add_one(item)
         return candidates
-
-    def _find_thirst_cfg_for_item(self, item):
-        for cand in self._collect_item_identity_strings(item):
-            upper_full = cand.upper()
-            if upper_full in self.thirst_items_map:
-                return self.thirst_items_map[upper_full], cand, upper_full
-            if ":" in upper_full:
-                short_key = upper_full.split(":", 1)[1]
-                if short_key in self.thirst_items_map:
-                    return self.thirst_items_map[short_key], cand, short_key
-        return None, None, None
-
-    def _load_thirst_items_config(self) -> None:
-        """仅从 SQLite 表 thirst_items 加载口渴物品（item_id、thirst_delta、buffs）。"""
-        self.thirst_items_map = {}
-        db_count = 0
-        try:
-            if not self.db_manager.table_exists("thirst_items"):
-                self._safe_log(
-                    'warning',
-                    "[ARCRealisticSurvival] thirst_items 表不存在，口渴物品配置为空（启动时应已自动建表）",
-                )
-                return
-            rows = self.db_manager.query_all(
-                "SELECT item_id, thirst_delta, buffs FROM thirst_items WHERE item_id IS NOT NULL AND item_id != ''"
-            )
-            for row in rows:
-                item_id = row.get("item_id")
-                if not item_id:
-                    continue
-                try:
-                    delta = int(row.get("thirst_delta", 0))
-                except Exception:
-                    continue
-                buffs_raw = row.get("buffs")
-                buffs_list = None
-                if buffs_raw:
-                    try:
-                        parsed = json.loads(buffs_raw)
-                        if isinstance(parsed, list):
-                            buffs_list = parsed
-                    except Exception:
-                        buffs_list = None
-                cfg = {
-                    "delta": delta,
-                    "buffs": buffs_list,
-                }
-                self._register_thirst_item_cfg(item_id, cfg)
-                db_count += 1
-        except Exception as e:
-            self._safe_log('error', f"[ARCRealisticSurvival] load thirst_items from DB error: {e}")
-
-        self._safe_log(
-            'info',
-            f"[ARCRealisticSurvival] thirst items: database={db_count} rows, "
-            f"lookup keys={len(self.thirst_items_map)} (含命名空间/短名展开)",
-        )
 
     # 生存-口渴系统：内部工具
     def _is_survival_like(self, player) -> bool:
@@ -1954,6 +1821,7 @@ class ARCRealisticSurvivalPlugin(Plugin):
 
     @event_handler()
     def on_player_item_consume(self, event: PlayerItemConsumeEvent):
+        """统一进食入口：口渴/营养/感染/buffs 全部由 consume_items 配置一次性应用。"""
         try:
             player = event.player
             if not self._is_survival_like(player):
@@ -1964,76 +1832,8 @@ class ARCRealisticSurvivalPlugin(Plugin):
                     f"player={player.name} item=None，跳过（事件未携带物品栈）",
                 )
                 return
-
-            identity_list = self._collect_item_identity_strings(item)
-            cfg, matched_src, lookup_key = self._find_thirst_cfg_for_item(item)
-            hand = getattr(event, "hand", None)
-
-            if self.thirst_consume_debug:
-                self._safe_log(
-                    'info',
-                    f"[ARS][consume][verbose] player={player.name} hand={hand!r} "
-                    f"identities={identity_list!r} matched_key={lookup_key!r} from={matched_src!r} "
-                    f"has_cfg={cfg is not None}",
-                )
-
-            # ARC 物品包：不依赖 BP 调 /arseffect（脚本 runCommand 失败会导致不加口渴）
-            pack_id = None
-            for cand in identity_list:
-                if get_pack_effect(cand) is not None:
-                    pack_id = normalize_item_id(cand)
-                    break
-            if pack_id is not None:
-                self._log_consume_debug(
-                    f"player={player.name} hand={hand!r} identities={identity_list!r} "
-                    f"→ 命中 pack_effect id={pack_id}",
-                )
-                self._cmd_apply_pack_effect(player, player, pack_id, quiet=True)
+            if self.consume_manager is None:
                 return
-
-            thirst_handled = False
-            if cfg is not None:
-                delta = int(cfg.get("delta", 0))
-                self._log_consume_debug(
-                    f"player={player.name} hand={hand!r} identities={identity_list!r} "
-                    f"→ 命中 key={lookup_key!r} thirst_delta={delta}",
-                )
-                self._apply_thirst_delta(player, delta, reason="consume")
-                self._apply_item_buffs(player, cfg.get("buffs") or [])
-                thirst_handled = True
-
-            nutrition_handled = False
-            if self.nutrition_manager is not None:
-                nutrition_handled = self.nutrition_manager.on_player_consume(player, item)
-
-            if not thirst_handled and not nutrition_handled:
-                self._log_consume_debug(
-                    f"player={player.name} hand={hand!r} identities={identity_list!r} "
-                    f"→ 未匹配 thirst_items / nutrition_items",
-                )
-                return
+            self.consume_manager.on_player_consume(player, item)
         except Exception as e:
             self._safe_log('error', f"[ARS] consume event error: {e}")
-
-    def _apply_item_buffs(self, player, buffs: list) -> None:
-        for buff in buffs:
-            if not isinstance(buff, dict):
-                continue
-            eff_name = buff.get("name")
-            if not eff_name:
-                continue
-            try:
-                duration_sec = int(buff.get("duration", 30))
-            except Exception:
-                duration_sec = 30
-            try:
-                amplifier = int(buff.get("amplifier", 0))
-            except Exception:
-                amplifier = 0
-            try:
-                effect_type = resolve_effect_type(str(eff_name))
-                if effect_type is None:
-                    continue
-                apply_mob_effect(player, effect_type, duration_sec * 20, amplifier, ambient=True)
-            except Exception as e:
-                self._safe_log('error', f"[ARS] apply item buff error: {e}")

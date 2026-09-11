@@ -10,7 +10,6 @@ from .effect_compat import EffectType, apply_mob_effect, remove_mob_effect
 
 
 NUTRIENT_KEYS = ("vitamin_a", "vitamin_c", "iron", "protein")
-
 NUTRIENT_LABELS = {
     "vitamin_a": "维生素A",
     "vitamin_c": "维生素C",
@@ -37,39 +36,6 @@ MODIFIER_IDS = (
     "ars:anemia_exhaustion",
     "ars:myasthenia_attack",
 )
-
-DEFAULT_NUTRITION_ITEMS = [
-    ("minecraft:carrot", "胡萝卜", 25, 2, 1, 1),
-    ("minecraft:golden_carrot", "金胡萝卜", 40, 3, 2, 2),
-    ("minecraft:potato", "土豆", 2, 5, 1, 3),
-    ("minecraft:baked_potato", "烤土豆", 3, 6, 2, 4),
-    ("minecraft:beetroot", "甜菜根", 3, 8, 2, 2),
-    ("minecraft:beetroot_soup", "甜菜汤", 5, 10, 3, 5),
-    ("minecraft:apple", "苹果", 2, 12, 1, 1),
-    ("minecraft:melon_slice", "西瓜片", 1, 15, 1, 1),
-    ("minecraft:sweet_berries", "甜浆果", 2, 18, 1, 1),
-    ("minecraft:glow_berries", "发光浆果", 4, 10, 1, 2),
-    ("minecraft:chorus_fruit", "紫颂果", 3, 8, 1, 2),
-    ("minecraft:bread", "面包", 1, 3, 2, 6),
-    ("minecraft:cooked_beef", "熟牛肉", 2, 2, 18, 20),
-    ("minecraft:cooked_porkchop", "熟猪排", 2, 2, 16, 18),
-    ("minecraft:cooked_mutton", "熟羊肉", 2, 2, 14, 16),
-    ("minecraft:cooked_chicken", "熟鸡肉", 2, 3, 12, 16),
-    ("minecraft:cooked_cod", "熟鳕鱼", 3, 4, 10, 14),
-    ("minecraft:cooked_salmon", "熟鲑鱼", 3, 5, 12, 15),
-    ("minecraft:beef", "生牛肉", 1, 1, 10, 12),
-    ("minecraft:porkchop", "生猪排", 1, 1, 9, 11),
-    ("minecraft:mutton", "生羊肉", 1, 1, 8, 10),
-    ("minecraft:chicken", "生鸡肉", 1, 2, 7, 10),
-    ("minecraft:cod", "生鳕鱼", 2, 3, 6, 9),
-    ("minecraft:salmon", "生鲑鱼", 2, 4, 7, 10),
-    ("minecraft:egg", "鸡蛋", 4, 2, 4, 10),
-    ("minecraft:rabbit_stew", "兔肉煲", 5, 8, 14, 16),
-    ("minecraft:mushroom_stew", "蘑菇煲", 3, 6, 5, 8),
-    ("minecraft:pumpkin_pie", "南瓜派", 8, 5, 3, 5),
-    ("minecraft:cookie", "曲奇", 1, 2, 2, 3),
-    ("minecraft:golden_apple", "金苹果", 10, 15, 8, 8),
-]
 
 WARN_MESSAGES = {
     ("vitamin_a", "mild"): ("营养提示", "你开始感到夜间视物有些模糊…"),
@@ -104,16 +70,13 @@ class NutritionManager:
         setting_manager,
         log_fn: Callable[[str, str], None],
         get_xuid_fn: Callable[[Any], str],
-        collect_item_identities_fn: Callable[[Any], list],
     ):
         self.plugin = plugin
         self.db_manager = db_manager
         self.setting_manager = setting_manager
         self._log = log_fn
         self._get_xuid = get_xuid_fn
-        self._collect_item_identities = collect_item_identities_fn
 
-        self.nutrition_items_map: dict[str, dict] = {}
         self.player_nutrition: dict[str, dict[str, int]] = {}
         self.player_severity: dict[str, dict[str, str]] = {}
         self.player_last_consume: dict[str, dict] = {}
@@ -161,90 +124,6 @@ class NutritionManager:
         }
         if self.db_manager.create_table("player_nutrition", player_fields):
             self._log("info", "[ARS] player_nutrition table ready")
-
-        item_fields = {
-            "id": "INTEGER PRIMARY KEY AUTOINCREMENT",
-            "item_id": "TEXT NOT NULL UNIQUE",
-            "item_name": "TEXT",
-            "vitamin_a": "INTEGER NOT NULL DEFAULT 0",
-            "vitamin_c": "INTEGER NOT NULL DEFAULT 0",
-            "iron": "INTEGER NOT NULL DEFAULT 0",
-            "protein": "INTEGER NOT NULL DEFAULT 0",
-            "created_at": "TEXT",
-            "updated_at": "TEXT",
-        }
-        if self.db_manager.create_table("nutrition_items", item_fields):
-            self._log("info", "[ARS] nutrition_items table ready")
-            self._seed_default_items_if_empty()
-
-    def _seed_default_items_if_empty(self) -> None:
-        try:
-            row = self.db_manager.query_one("SELECT COUNT(*) AS cnt FROM nutrition_items")
-            if row and int(row.get("cnt", 0)) > 0:
-                return
-            now = datetime.datetime.utcnow().isoformat()
-            for item_id, name, va, vc, fe, pr in DEFAULT_NUTRITION_ITEMS:
-                self.db_manager.insert("nutrition_items", {
-                    "item_id": item_id,
-                    "item_name": name,
-                    "vitamin_a": va,
-                    "vitamin_c": vc,
-                    "iron": fe,
-                    "protein": pr,
-                    "created_at": now,
-                    "updated_at": now,
-                })
-            self._log("info", f"[ARS] seeded {len(DEFAULT_NUTRITION_ITEMS)} default nutrition_items rows")
-        except Exception as e:
-            self._log("error", f"[ARS] seed nutrition_items error: {e}")
-
-    def load_items_config(self) -> None:
-        self.nutrition_items_map = {}
-        count = 0
-        try:
-            if not self.db_manager.table_exists("nutrition_items"):
-                return
-            rows = self.db_manager.query_all(
-                "SELECT item_id, item_name, vitamin_a, vitamin_c, iron, protein "
-                "FROM nutrition_items WHERE item_id IS NOT NULL AND item_id != ''"
-            )
-            for row in rows:
-                item_id = row.get("item_id")
-                if not item_id:
-                    continue
-                cfg = {
-                    "item_name": row.get("item_name") or item_id,
-                    "vitamin_a": int(row.get("vitamin_a", 0)),
-                    "vitamin_c": int(row.get("vitamin_c", 0)),
-                    "iron": int(row.get("iron", 0)),
-                    "protein": int(row.get("protein", 0)),
-                }
-                self._register_item_cfg(item_id, cfg)
-                count += 1
-        except Exception as e:
-            self._log("error", f"[ARS] load nutrition_items error: {e}")
-        self._log("info", f"[ARS] nutrition items: database={count} rows, lookup keys={len(self.nutrition_items_map)}")
-
-    def _register_item_cfg(self, item_id: str, cfg: dict) -> None:
-        raw = str(item_id).strip()
-        if not raw:
-            return
-        upper_full = raw.upper()
-        self.nutrition_items_map[upper_full] = cfg
-        if ":" in upper_full:
-            short_key = upper_full.split(":", 1)[1]
-            self.nutrition_items_map[short_key] = cfg
-
-    def find_cfg_for_item(self, item) -> tuple[Optional[dict], Optional[str], Optional[str]]:
-        for cand in self._collect_item_identities(item):
-            upper_full = cand.upper()
-            if upper_full in self.nutrition_items_map:
-                return self.nutrition_items_map[upper_full], cand, upper_full
-            if ":" in upper_full:
-                short_key = upper_full.split(":", 1)[1]
-                if short_key in self.nutrition_items_map:
-                    return self.nutrition_items_map[short_key], cand, short_key
-        return None, None, None
 
     def _clamp(self, value: int) -> int:
         return max(self.nutrition_min, min(self.nutrition_max, value))
@@ -625,23 +504,6 @@ class NutritionManager:
         else:
             self._apply_persistent_symptoms(player)
 
-    def on_player_consume(self, player, item) -> bool:
-        if player.game_mode != GameMode.SURVIVAL and player.game_mode != GameMode.ADVENTURE:
-            return False
-        cfg, _, lookup_key = self.find_cfg_for_item(item)
-        if cfg is None:
-            return False
-        deltas = {k: int(cfg.get(k, 0)) for k in NUTRIENT_KEYS}
-        if all(v == 0 for v in deltas.values()):
-            return False
-        label = cfg.get("item_name") or lookup_key or "未知食物"
-        self.apply_deltas(player, deltas, item_label=label)
-        self._log(
-            "info",
-            f"[ARS][nutrition] player={player.name} item={label} deltas={deltas}",
-        )
-        return True
-
     def tick_decay_for_player(self, player) -> None:
         """统一定时器调用：衰减营养并刷症状。"""
         try:
@@ -695,22 +557,4 @@ class NutritionManager:
             lines.append(f"最近进食: {last.get('item', '?')} ({', '.join(parts) or '无营养'})")
         else:
             lines.append("最近进食: 无记录")
-        return lines
-
-    def get_food_catalog_lines(self, limit: int = 20) -> list[str]:
-        lines = ["=== 食物营养表（节选）==="]
-        try:
-            rows = self.db_manager.query_all(
-                "SELECT item_name, item_id, vitamin_a, vitamin_c, iron, protein "
-                "FROM nutrition_items ORDER BY item_name LIMIT ?",
-                (limit,),
-            )
-            for row in rows:
-                name = row.get("item_name") or row.get("item_id")
-                lines.append(
-                    f"{name}: A+{row['vitamin_a']} C+{row['vitamin_c']} "
-                    f"Fe+{row['iron']} P+{row['protein']}"
-                )
-        except Exception:
-            lines.append("（无法读取食物表）")
         return lines

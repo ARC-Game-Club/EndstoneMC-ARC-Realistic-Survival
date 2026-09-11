@@ -1,7 +1,9 @@
-"""ARC 真实生存物品包（behavior pack）效果目录。
+"""ARC 真实生存物品包（behavior pack）内置默认效果目录。
 
-物品模组通过 /arseffect <玩家> <物品ID> 调用；也可拆开用 /thirstadd、/nutriadd、/purify。
-数值与模组设计对齐；/heal 仅管理用，不进本目录。
+此目录只是 ConsumeEffectManager 的内置默认值来源：首次加载时会补齐到
+consume_items 统一配置表（表内已有行不覆盖）。运行时效果一律以
+consume_items 表为准；行为包脚本不再调用 /arseffect 指令。
+/heal 仅管理用，不进本目录。
 """
 
 # key: 完整物品 ID（小写）
@@ -68,16 +70,3 @@ ARC_PACK_EFFECTS: dict[str, dict] = {
 
 def normalize_item_id(item_id: str) -> str:
     return str(item_id or "").strip().lower()
-
-
-def get_pack_effect(item_id: str) -> dict | None:
-    key = normalize_item_id(item_id)
-    if not key:
-        return None
-    if key in ARC_PACK_EFFECTS:
-        return ARC_PACK_EFFECTS[key]
-    # 允许短名 BOTTLED_WATER / bottled_water
-    if ":" not in key:
-        full = f"arc:{key}"
-        return ARC_PACK_EFFECTS.get(full)
-    return None
