@@ -163,3 +163,6 @@ wheelhouse/
 # IDE
 .cursor/
 .joycode/
+
+# ZCode workspace
+.zcode/

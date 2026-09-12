@@ -1,6 +1,6 @@
 # ARC Realistic Survival - 真实生存插件
 [![Codacy Grade](https://app.codacy.com/project/badge/Grade/035827370d734c539602adbeca85f6d4)](https://app.codacy.com/gh/DEVILENMO/EndstoneMC-ARC-Realistic-Survival/dashboard?utm_source=gh&utm_medium=referral&utm_content=&utm_campaign=Badge_grade)
-[![Version](https://img.shields.io/badge/version-v0.4.0-blue)](https://github.com/DEVILENMO/EndstoneMC-ARC-Realistic-Survival)
+[![Version](https://img.shields.io/badge/version-v0.4.1-blue)](https://github.com/DEVILENMO/EndstoneMC-ARC-Realistic-Survival)
 
 
 一个为 Endstone 服务器打造的真实生存插件，添加口渴值、营养学、丧尸病毒、统一进食效果等功能，让生存体验更加真实有趣。
@@ -11,7 +11,7 @@
 - **动态口渴值**：玩家口渴值范围 0–100，耗尽后停留在 0 并进入严重脱水计时
 - **自动衰减**：口渴值会随时间自动降低
 - **移动加速消耗**：玩家移动时口渴值消耗速度会增加
-- **移速联动**：口渴 >80 **+20%** 移速；30～80 无加成；<30 **-20%**；<15 **-50%**。再乘基速倍率（默认 **1.0** = 原版 `walk_speed` 0.10）；相对叠加，进服会按原版基速重算防叠乘
+- **移速联动**：口渴 >80 **+20%** 移速；30～80 无加成；<30 **-20%**；<15 **-50%**。再乘基速倍率（默认 **1.0** = 原版 `walk_speed` 0.10）；以 `ars:base`/`ars:thirst`/`ars:leg` 三路因子交由硬依赖 **`arc_attribute_core`** 统一连乘管理，与其他插件的属性调整共存
 - **严重脱水**：口渴到 0 后开始计时，持续满 1 小时给予 `instant_damage` 255 秒杀
 - **创造/旁观旁路**：切到创造或旁观时口渴/营养/感染显示为正常值并停止变动；切回生存/冒险时恢复原先数值
 - **数据持久化**：玩家口渴值会自动保存到数据库
@@ -30,6 +30,16 @@
 - **可配置感染源**：支持精确实体（如 `minecraft:zombie`）或整命名空间（如 `minecraft:`），单独实体优先于命名空间规则
 - **临界恶化**：默认超过 50 后每分钟 +5，低于 50 每分钟 -2
 - **丧尸化**：感染满 100 时先清零感染并落库，再控制台 `kill` 击杀玩家、原地生成丧尸（清零不依赖是否杀死成功）
+
+### 🦴 腿伤系统（v0.4.1：骨裂/骨折双档）
+
+- **骨裂（轻）**：坠落伤害 > 5 且未致死时按概率触发（10% + 5%×超出伤害，封顶 80%）；当前移速 -25%，移动时每秒掉 1 血（保底 1 血不死）
+- **骨裂自愈时长随坠落高度**：`300s + 30×超出伤害`，封顶 900s；死亡清除
+- **骨折（重）**：坠落直接摔死必然进入；当前移速 -50%、不掉血、不自动痊愈；**死亡不清除**，重生继续
+- **止痛药**（`arc:painkiller`）：骨裂使用后不再减速（移动掉血保留），状态持久化；骨折无效
+- **夹板**（`arc:splint`）：骨裂直接痊愈；骨折降级为骨裂（按最高坠落档 900 秒计）
+- **医生联动**（异能职业插件）：医生正骨可直接治骨裂；持夹板（消耗 1 个）可直接治愈骨折
+- 移速因子经 `arc_attribute_core` 以 `ars:leg` 接入统一连乘；创造/旁观自动旁路
 
 ### 📊 弧光核心侧边栏（v0.3.12）
 - 启动时向 `arc_core` 注册专属页面 **`ars_health`（真实生存）**
@@ -54,6 +64,7 @@
 - **Python 版本**：推荐 Python 3.13+
 - **Endstone API**：0.10+
 - **依赖插件**：
+  - `arc_attribute_core` - **硬依赖**：玩家属性/buff 管理器，负责移速等属性的统一因子管理
   - （可选）`arc_core` 或 `umoney` - 用于经济系统集成
 
 ## 📦 安装方法
@@ -145,6 +156,8 @@ infection_zombie_entities: zombie:zombie,zombie:zombie_runner,...  # 逗号分�
 | `thirst_delta` | 口渴值增量 |
 | `vitamin_a` / `vitamin_c` / `iron` / `protein` | 四项营养增量 |
 | `infection_delta` | 感染增量（负数为净化） |
+| `cure_fracture` | 1 = 夹板类腿伤物品（骨折降级为骨裂、骨裂痊愈） |
+| `painkiller` | 1 = 止痛药（骨裂不减速、移动掉血保留；骨折无效） |
 | `buffs` | 药水效果 JSON，如 `[{"name":"speed","duration":30,"amplifier":1}]` |
 | `show_toast` | 是否弹「服用了…」提示（内置 arc 物品为 1，原版食物为 0） |
 
@@ -292,6 +305,13 @@ python -m build
 ```
 
 ## 📝 更新日志
+
+### v0.4.1
+- **骨裂/骨折双档系统**：坠落伤害 >5 按概率骨裂（-25% 移速、移动掉血、自愈时长随坠落高度 300+30×超出封顶 900s）；摔死进入骨折（-50% 移速、不掉血、不自动痊愈、死亡不清除）
+- **止痛药/夹板**：`consume_items` 新增 `painkiller` / `cure_fracture` 列；止痛药让骨裂不再减速（掉血保留、跨会话持久），夹板治愈骨裂、将骨折降级为骨裂（最高档时长）
+- **移速全面接入 arc_attribute_core（硬依赖）**：ARS 以 `ars:base`/`ars:thirst`/`ars:leg` 三路因子交由属性核心连乘，移除本地移速因子管理（疾跑保护随核心负责）
+- **医生联动**（异能职业插件）：正骨支持骨裂直接治疗；医生持夹板可消耗治愈骨折
+- `player_fracture` 表新增 `level`/`no_slow` 列自动迁移；配置面板新增骨裂时长两项
 
 ### v0.4.0
 - **统一进食效果配置**：新增 `consume_items` 单表（口渴/四项营养/感染/buffs/show_toast 一行配齐），`PlayerItemConsumeEvent` 单一订阅点生效

@@ -1,4 +1,4 @@
-"""统一进食效果管理：单一 consume_items 配置表驱动口渴/营养/感染变动。
+"""统一进食效果管理：单一 consume_items 配置表驱动口渴/营养/感染变动与腿伤治疗。
 
 取代旧的三套进食配置：
 - thirst_items（口渴增量 + buffs）
@@ -68,6 +68,8 @@ CONSUME_ITEMS_FIELDS = {
     "iron": "INTEGER NOT NULL DEFAULT 0",
     "protein": "INTEGER NOT NULL DEFAULT 0",
     "infection_delta": "INTEGER NOT NULL DEFAULT 0",
+    "cure_fracture": "INTEGER NOT NULL DEFAULT 0",
+    "painkiller": "INTEGER NOT NULL DEFAULT 0",
     "buffs": "TEXT",
     "show_toast": "INTEGER NOT NULL DEFAULT 0",
     "created_at": "TEXT",
@@ -85,6 +87,8 @@ def _zero_row(item_id: str) -> dict:
         "iron": 0,
         "protein": 0,
         "infection_delta": 0,
+        "cure_fracture": 0,
+        "painkiller": 0,
         "buffs": None,
         "show_toast": 0,
     }
@@ -116,6 +120,10 @@ class ConsumeEffectManager:
     def ensure_tables(self) -> None:
         if self.db_manager.create_table("consume_items", CONSUME_ITEMS_FIELDS):
             self._log("info", "[ARS] consume_items table ready")
+        if not self.db_manager.ensure_column("consume_items", "cure_fracture", "INTEGER NOT NULL DEFAULT 0"):
+            self._log("warning", "[ARS] failed to add consume_items.cure_fracture")
+        if not self.db_manager.ensure_column("consume_items", "painkiller", "INTEGER NOT NULL DEFAULT 0"):
+            self._log("warning", "[ARS] failed to add consume_items.painkiller")
 
     def load_items_config(self) -> None:
         self.items_map = {}
@@ -127,7 +135,7 @@ class ConsumeEffectManager:
         try:
             rows = self.db_manager.query_all(
                 "SELECT item_id, item_name, thirst_delta, vitamin_a, vitamin_c, iron, protein, "
-                "infection_delta, buffs, show_toast FROM consume_items "
+                "infection_delta, cure_fracture, painkiller, buffs, show_toast FROM consume_items "
                 "WHERE item_id IS NOT NULL AND item_id != ''"
             )
             for row in rows:
@@ -152,6 +160,8 @@ class ConsumeEffectManager:
                     "iron": int(row.get("iron", 0) or 0),
                     "protein": int(row.get("protein", 0) or 0),
                     "infection_delta": int(row.get("infection_delta", 0) or 0),
+                    "cure_fracture": int(row.get("cure_fracture", 0) or 0),
+                    "painkiller": int(row.get("painkiller", 0) or 0),
                     "buffs": buffs_list,
                     "show_toast": int(row.get("show_toast", 0) or 0),
                 }
@@ -184,6 +194,10 @@ class ConsumeEffectManager:
             for k in NUTRIENT_KEYS:
                 row[k] = int(eff.get(k, 0) or 0)
             row["infection_delta"] = int(eff.get("infection", 0) or 0)
+            # 特殊效果列（止痛药/夹板等腿伤物品）
+            for flag in ("painkiller", "cure_fracture"):
+                if flag in eff:
+                    row[flag] = int(eff[flag] or 0)
             row["show_toast"] = 1
             merged[key] = row
         return merged
@@ -406,6 +420,32 @@ class ConsumeEffectManager:
         buffs = cfg.get("buffs") or []
         if buffs:
             self._apply_buffs(player, buffs)
+
+        # 腿伤处理（夹板）：骨折→降级为骨裂（最长时长）；骨裂→痊愈
+        if int(cfg.get("cure_fracture", 0) or 0):
+            fmg = getattr(self.plugin, "fracture_manager", None)
+            if fmg is not None:
+                try:
+                    result, _ = fmg.apply_leg_treatment(player)
+                except Exception as e:
+                    self.plugin._log_consume_debug(f"leg treatment error: {e}")
+                    result = "none"
+                if result == "cured":
+                    bits.append("腿伤已治疗")
+                elif result == "downgraded":
+                    bits.append("骨折已固定为骨裂")
+
+        # 止痛药：骨裂不再减速（移动掉血保留）；骨折无效
+        if int(cfg.get("painkiller", 0) or 0):
+            fmg = getattr(self.plugin, "fracture_manager", None)
+            if fmg is not None:
+                try:
+                    ok, _ = fmg.apply_painkiller(player)
+                except Exception as e:
+                    self.plugin._log_consume_debug(f"painkiller error: {e}")
+                    ok = False
+                if ok:
+                    bits.append("止痛生效")
 
         if allow_toast and show_toast and bits:
             try:

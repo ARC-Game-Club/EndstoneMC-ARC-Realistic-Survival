@@ -12,6 +12,7 @@ from endstone.form import ActionForm, ModalForm, Label, TextInput
 
 from .ConsumeEffectManager import ConsumeEffectManager
 from .DatabaseManager import DatabaseManager
+from .FractureManager import FractureManager
 from .LanguageManager import LanguageManager
 from .NutritionManager import NUTRIENT_KEYS, NutritionManager
 from .SettingManager import SettingManager
@@ -24,6 +25,8 @@ class ARCRealisticSurvivalPlugin(Plugin):
     prefix = "ARCRealisticSurvivalPlugin"
     api_version = "0.10"
     load = "POSTWORLD"
+    # 硬依赖：玩家属性/buff 管理器，负责移速等属性的统一因子管理
+    depend = ["arc_attribute_core"]
 
     commands = {
         "ars": {
@@ -39,7 +42,7 @@ class ARCRealisticSurvivalPlugin(Plugin):
             "permissions": ["arc_realistic_survival.command.common"],
         },
         "heal": {
-            "description": "治愈缺素病症并将营养设为 80（不影响丧尸感染；仅 OP/控制台；物品模组不用）",
+            "description": "治愈缺素病症并将营养设为 80，同时治疗骨裂/骨折（不影响丧尸感染；仅 OP/控制台；物品模组不用）",
             "usages": ["/heal <player: player>"],
             "permissions": ["arc_realistic_survival.command.admin"],
         },
@@ -111,13 +114,12 @@ class ARCRealisticSurvivalPlugin(Plugin):
         self.thirst_fatal_seconds = 3600
         self.walk_speed_base_multiplier = 1.0
         self.player_xuid_to_dehydrated_since = {}
-        # 本插件已施加的移速调整因子（默认 1.0 = 未调整）
-        self.player_xuid_to_speed_factor = {}
-        self.SPEED_FACTOR_NEUTRAL = 1.0
-        self.SPEED_FACTOR_MIN = 0.01
-        self.VANILLA_WALK_SPEED = 0.10
         # 统一进食效果配置（consume_items 表：口渴/营养/感染/buffs 一行配齐）
         self.consume_manager = None
+        # 骨裂系统（坠落重摔概率触发：减速 + 移动掉血）
+        self.fracture_manager = None
+        # 玩家属性/buff 管理器（arc_attribute_core）缓存：安装后移速因子交由其统一连乘管理
+        self._attr_core_cache = None
         # 创造/旁观时冻结真实生存数值；切回生存时恢复
         self._creative_snapshots = {}
         self.nutrition_manager = None
@@ -219,6 +221,16 @@ class ARCRealisticSurvivalPlugin(Plugin):
         )
         self.consume_manager.ensure_tables()
         self.consume_manager.load_items_config()
+        # 初始化骨裂管理器（坠落重摔概率触发）
+        self.fracture_manager = FractureManager(
+            self,
+            self.db_manager,
+            self.setting_manager,
+            self._safe_log,
+            self._get_player_xuid,
+        )
+        self.fracture_manager.ensure_tables()
+        self.fracture_manager.load_settings()
         # 加载生存-口渴系统配置
         self._load_thirst_settings()
 
@@ -271,6 +283,8 @@ class ARCRealisticSurvivalPlugin(Plugin):
                     self.nutrition_manager.persist_player(player)
                 if self.zombie_virus_manager is not None:
                     self.zombie_virus_manager.persist_player(player)
+                if self.fracture_manager is not None:
+                    self.fracture_manager.persist_player(player)
         except Exception:
             pass
         if hasattr(self, 'db_manager'):
@@ -657,8 +671,12 @@ class ARCRealisticSurvivalPlugin(Plugin):
                 try:
                     data = self.nutrition_manager.heal_to(target, 80)
                     self._sync_creative_snap_nutrition(target, data)
+                    fracture_cleared = False
+                    if self.fracture_manager is not None:
+                        fracture_cleared = self.fracture_manager.clear_fracture(target, notify=False)
+                    extra = "，腿伤已治疗" if fracture_cleared else ""
                     sender.send_message(
-                        f"[ARS] 已治愈 {target.name}：营养已设为 80，缺素病症已清除（感染未改动）"
+                        f"[ARS] 已治愈 {target.name}：营养已设为 80，缺素病症已清除{extra}（感染未改动）"
                     )
                     try:
                         target.send_toast("治疗", "你的身体状况已恢复。")
@@ -864,6 +882,8 @@ class ARCRealisticSurvivalPlugin(Plugin):
             if self.zombie_virus_manager is not None:
                 self.zombie_virus_manager.load_settings()
                 self.zombie_virus_manager.load_sources_config()
+            if self.fracture_manager is not None:
+                self.fracture_manager.load_settings()
             if self.thirst_task is not None:
                 try:
                     self.thirst_task.cancel()
@@ -880,7 +900,7 @@ class ARCRealisticSurvivalPlugin(Plugin):
             try:
                 for p in self.server.online_players:
                     if self._is_survival_like(p):
-                        self._reset_walk_speed_baseline(p)
+                        self._apply_thirst_movement_modifier(p)
                     self._push_sidebar_for_player(p)
             except Exception:
                 pass
@@ -932,6 +952,7 @@ class ARCRealisticSurvivalPlugin(Plugin):
         try:
             nm = self.nutrition_manager
             zvm = self.zombie_virus_manager
+            fm = self.fracture_manager
             title = "ARC Realistic Survival 配置"
             content_lines = [
                 "修改后提交即写入配置并热重载",
@@ -1003,6 +1024,61 @@ class ARCRealisticSurvivalPlugin(Plugin):
                 placeholder="低于临界每分钟下降",
                 default_value=str(int(zvm.infection_decay_per_minute if zvm else 2))
             )
+            input_fracture_enabled = TextInput(
+                label="fracture_enabled",
+                placeholder="骨裂开关 true/false（默认 true）",
+                default_value=("true" if (fm and fm.enabled) else "false")
+            )
+            input_fracture_min = TextInput(
+                label="fracture_fall_damage_min",
+                placeholder="坠落伤害大于该值才可能骨裂（默认 5）",
+                default_value=str(fm.fall_damage_min if fm else 5)
+            )
+            input_fracture_base = TextInput(
+                label="fracture_chance_base_percent",
+                placeholder="刚过阈值时的骨裂率 %（默认 10）",
+                default_value=str(fm.chance_base_percent if fm else 10)
+            )
+            input_fracture_per = TextInput(
+                label="fracture_chance_per_damage_percent",
+                placeholder="每高 1 点伤害增加的骨裂率 %（默认 5）",
+                default_value=str(fm.chance_per_damage_percent if fm else 5)
+            )
+            input_fracture_max = TextInput(
+                label="fracture_chance_max_percent",
+                placeholder="骨裂率上限 %（默认 80）",
+                default_value=str(fm.chance_max_percent if fm else 80)
+            )
+            input_fracture_speed = TextInput(
+                label="fracture_speed_multiplier",
+                placeholder="骨裂后移速倍率，0.75 = 当前基础上 -25%",
+                default_value=str(fm.speed_multiplier if fm else 0.75)
+            )
+            input_fracture_heal = TextInput(
+                label="fracture_heal_seconds",
+                placeholder="骨裂基础时长（最低坠落档，默认 300）",
+                default_value=str(fm.heal_seconds if fm else 300)
+            )
+            input_fracture_drain = TextInput(
+                label="fracture_drain_hp_per_second",
+                placeholder="移动时每秒掉血（默认 1，0=不掉血）",
+                default_value=str(fm.drain_hp_per_second if fm else 1)
+            )
+            input_fracture_severe_speed = TextInput(
+                label="fracture_severe_speed_multiplier",
+                placeholder="骨折后移速倍率，0.5 = 当前基础上 -50%",
+                default_value=str(fm.severe_speed_multiplier if fm else 0.5)
+            )
+            input_crack_per_damage = TextInput(
+                label="fracture_crack_per_damage_seconds",
+                placeholder="骨裂时长：每点坠落伤害延长秒数（默认 30）",
+                default_value=str(fm.crack_per_damage_seconds if fm else 30)
+            )
+            input_crack_duration_max = TextInput(
+                label="fracture_crack_duration_max",
+                placeholder="骨裂时长上限/夹板降级后的时长（默认 900）",
+                default_value=str(fm.crack_duration_max if fm else 900)
+            )
 
             def on_submit(sender, json_str: str):
                 try:
@@ -1020,6 +1096,17 @@ class ARCRealisticSurvivalPlugin(Plugin):
                     new_i_threshold = float(data[11])
                     new_i_growth = float(data[12])
                     new_i_decay = float(data[13])
+                    new_f_enabled_raw = str(data[14]).strip().lower()
+                    new_f_min = float(data[15])
+                    new_f_base = float(data[16])
+                    new_f_per = float(data[17])
+                    new_f_max = float(data[18])
+                    new_f_speed = float(data[19])
+                    new_f_heal = int(float(data[20]))
+                    new_f_drain = int(float(data[21]))
+                    new_f_severe_speed = float(data[22])
+                    new_crack_per_damage = float(data[23])
+                    new_crack_max = float(data[24])
 
                     if new_tick < 1:
                         raise ValueError("thirst tick seconds < 1")
@@ -1046,6 +1133,25 @@ class ARCRealisticSurvivalPlugin(Plugin):
                         raise ValueError("infection threshold out of (0,100)")
                     if new_i_growth < 0 or new_i_decay < 0:
                         raise ValueError("infection growth/decay < 0")
+                    if new_f_enabled_raw not in ("1", "0", "true", "false", "yes", "no", "on", "off"):
+                        raise ValueError("fracture_enabled must be true/false")
+                    new_f_enabled = new_f_enabled_raw in ("1", "true", "yes", "on")
+                    if new_f_min < 0:
+                        raise ValueError("fracture fall damage min < 0")
+                    if new_f_base < 0 or new_f_per < 0 or new_f_max < 0:
+                        raise ValueError("fracture chance percents < 0")
+                    if not (0.05 <= new_f_speed <= 1.0):
+                        raise ValueError("fracture speed multiplier out of [0.05,1.0]")
+                    if not (0.05 <= new_f_severe_speed <= 1.0):
+                        raise ValueError("fracture severe speed multiplier out of [0.05,1.0]")
+                    if new_crack_per_damage < 0:
+                        raise ValueError("fracture crack per damage < 0")
+                    if new_crack_max < 30:
+                        raise ValueError("fracture crack duration max < 30")
+                    if new_f_heal < 30:
+                        raise ValueError("fracture heal seconds < 30")
+                    if new_f_drain < 0:
+                        raise ValueError("fracture drain hp < 0")
 
                     self.setting_manager.SetSetting("thirst_tick_seconds", str(new_tick))
                     self.setting_manager.SetSetting("thirst_decay_per_tick", str(new_decay))
@@ -1060,6 +1166,17 @@ class ARCRealisticSurvivalPlugin(Plugin):
                     self.setting_manager.SetSetting("infection_threshold", str(new_i_threshold))
                     self.setting_manager.SetSetting("infection_growth_per_minute", str(new_i_growth))
                     self.setting_manager.SetSetting("infection_decay_per_minute", str(new_i_decay))
+                    self.setting_manager.SetSetting("fracture_enabled", "true" if new_f_enabled else "false")
+                    self.setting_manager.SetSetting("fracture_fall_damage_min", str(new_f_min))
+                    self.setting_manager.SetSetting("fracture_chance_base_percent", str(new_f_base))
+                    self.setting_manager.SetSetting("fracture_chance_per_damage_percent", str(new_f_per))
+                    self.setting_manager.SetSetting("fracture_chance_max_percent", str(new_f_max))
+                    self.setting_manager.SetSetting("fracture_speed_multiplier", str(new_f_speed))
+                    self.setting_manager.SetSetting("fracture_heal_seconds", str(new_f_heal))
+                    self.setting_manager.SetSetting("fracture_drain_hp_per_second", str(new_f_drain))
+                    self.setting_manager.SetSetting("fracture_severe_speed_multiplier", str(new_f_severe_speed))
+                    self.setting_manager.SetSetting("fracture_crack_per_damage_seconds", str(new_crack_per_damage))
+                    self.setting_manager.SetSetting("fracture_crack_duration_max", str(new_crack_max))
 
                     self._reload_survival_settings()
                     sender.send_message("[ARS] 配置已保存并重载")
@@ -1073,6 +1190,10 @@ class ARCRealisticSurvivalPlugin(Plugin):
                     input_nutrition_tick, input_nutrition_decay, input_nutrition_initial, input_nutrition_cooldown,
                     input_infection_enabled, input_infection_tick, input_infection_threshold,
                     input_infection_growth, input_infection_decay,
+                    input_fracture_enabled, input_fracture_min, input_fracture_base,
+                    input_fracture_per, input_fracture_max, input_fracture_speed,
+                    input_fracture_heal, input_fracture_drain, input_fracture_severe_speed,
+                    input_crack_per_damage, input_crack_duration_max,
                 ],
                 on_close=lambda s: None,
                 on_submit=on_submit,
@@ -1266,100 +1387,80 @@ class ARCRealisticSurvivalPlugin(Plugin):
     def _thirst_speed_factor(self, thirst: int) -> float:
         """口渴对应的相对因子：1.0 + 分段加成。"""
         factor = 1.0 + self._thirst_speed_amount(thirst)
-        return max(float(self.SPEED_FACTOR_MIN), float(factor))
+        return max(0.01, float(factor))
 
-    def _combined_speed_factor(self, thirst: int) -> float:
-        """最终施加因子 = 基速倍率 × 口渴因子（相对原版 0.10）。"""
-        combined = float(self.walk_speed_base_multiplier) * self._thirst_speed_factor(thirst)
-        return max(float(self.SPEED_FACTOR_MIN), combined)
-
-    def _set_speed_factor(self, player, new_factor: float) -> None:
-        """
-        相对叠加移速：walk_speed = walk_speed / 旧因子 * 新因子。
-        本会话首次写入时按原版基速绝对值设置，避免上次残留 walk_speed 被再次乘除变成乌龟速。
-        改 walk_speed 会打断疾跑，故改前记录 is_sprinting，改后恢复。
-        """
+    def _get_attr_core(self):
+        """获取硬依赖 arc_attribute_core（玩家属性/buff 管理器）；找到后缓存。"""
+        core = getattr(self, "_attr_core_cache", None)
+        if core is not None:
+            return core
         try:
-            if not hasattr(player, "walk_speed"):
-                return
-            xuid = self._get_player_xuid(player)
-            new_factor = max(float(self.SPEED_FACTOR_MIN), float(new_factor))
-            was_sprinting = self._read_is_sprinting(player)
-            if xuid not in self.player_xuid_to_speed_factor:
-                player.walk_speed = max(0.01, float(self.VANILLA_WALK_SPEED) * new_factor)
-                self.player_xuid_to_speed_factor[xuid] = new_factor
-                self._restore_sprint_after_speed_change(player, was_sprinting)
-                return
-            old_factor = float(self.player_xuid_to_speed_factor.get(xuid, self.SPEED_FACTOR_NEUTRAL))
-            if old_factor <= 0:
-                old_factor = float(self.SPEED_FACTOR_NEUTRAL)
-            if abs(new_factor - old_factor) < 1e-9:
-                self.player_xuid_to_speed_factor[xuid] = new_factor
-                return
-            current = float(player.walk_speed)
-            player.walk_speed = max(0.01, current / old_factor * new_factor)
-            self.player_xuid_to_speed_factor[xuid] = new_factor
-            self._restore_sprint_after_speed_change(player, was_sprinting)
+            core = self.server.plugin_manager.get_plugin("arc_attribute_core")
+        except Exception:
+            return None
+        if core is not None and callable(getattr(core, "api_add_factor", None)):
+            self._attr_core_cache = core
+            self._safe_log('info', "[ARCRealisticSurvival] 已接入 arc_attribute_core，移速因子交由属性核心统一管理")
+            return core
+        return None
+
+    def _ars_speed_amounts(self, player) -> dict[str, float]:
+        """ARS 各来源的 walk_speed 调整量（乘法因子 - 1）。"""
+        xuid = self._get_player_xuid(player)
+        thirst = int(self.player_xuid_to_thirst.get(xuid, self.thirst_initial))
+        fracture_factor = (
+            self.fracture_manager.speed_factor_for(player)
+            if self.fracture_manager is not None
+            else 1.0
+        )
+        return {
+            "ars:base": float(self.walk_speed_base_multiplier) - 1.0,
+            "ars:thirst": float(self._thirst_speed_factor(thirst)) - 1.0,
+            "ars:leg": float(fracture_factor) - 1.0,
+        }
+
+    def _sync_movement_factors(self, player) -> None:
+        """把 ARS 移速因子（基速/口渴/腿伤）同步到属性核心统一连乘落地。
+
+        arc_attribute_core 为硬依赖（Plugin.depend 保证加载顺序）；
+        核心缺失时告警一次并跳过（此时移速调整不可用，其余功能不受影响）。
+        """
+        core = self._get_attr_core()
+        if core is None:
+            if not getattr(self, "_attr_core_missing_warned", False):
+                self._attr_core_missing_warned = True
+                self._safe_log(
+                    'error',
+                    "[ARCRealisticSurvival] 未找到 arc_attribute_core（硬依赖），移速调整不可用",
+                )
+            return
+        try:
+            for source, amount in self._ars_speed_amounts(player).items():
+                if abs(amount) < 1e-9:
+                    try:
+                        core.api_remove_factor(player, "walk_speed", source)
+                    except Exception:
+                        pass
+                else:
+                    core.api_add_factor(player, "walk_speed", source=source, amount=amount)
         except Exception as e:
-            self._safe_log('error', f"[ARS] set speed factor error: {e}")
-
-    def _read_is_sprinting(self, player) -> bool:
-        try:
-            return bool(getattr(player, "is_sprinting", False))
-        except Exception:
-            return False
-
-    def _restore_sprint_after_speed_change(self, player, was_sprinting: bool) -> None:
-        """改 walk_speed 后恢复疾跑；同 tick + 下一 tick 各写一次，避免客户端被拉回走路。"""
-        if not was_sprinting or not hasattr(player, "is_sprinting"):
-            return
-        try:
-            player.is_sprinting = True
-        except Exception:
-            return
-        try:
-            self._run_player_task(player, self._delayed_restore_sprint, delay=1)
-        except Exception:
-            pass
-
-    def _delayed_restore_sprint(self, player) -> None:
-        try:
-            if player is None or not hasattr(player, "is_sprinting"):
-                return
-            player.is_sprinting = True
-        except Exception:
-            pass
+            self._safe_log('error', f"[ARS] sync movement via attribute core error: {e}")
 
     def _apply_thirst_movement_modifier(self, player) -> None:
-        """按基速倍率与当前口渴重算因子，相对应用到 walk_speed。"""
-        try:
-            xuid = self._get_player_xuid(player)
-            thirst = int(self.player_xuid_to_thirst.get(xuid, self.thirst_initial))
-            self._set_speed_factor(player, self._combined_speed_factor(thirst))
-        except Exception as e:
-            self._safe_log('error', f"[ARS] thirst walk_speed error: {e}")
-
-    def _reset_walk_speed_baseline(self, player) -> None:
-        """强制按原版基速重算本插件因子（修复异常乌龟速）。"""
-        try:
-            xuid = self._get_player_xuid(player)
-            self.player_xuid_to_speed_factor.pop(xuid, None)
-            self._apply_thirst_movement_modifier(player)
-        except Exception as e:
-            self._safe_log('error', f"[ARS] reset walk_speed baseline error: {e}")
+        """重算并应用移速：把 ARS 三路因子同步到属性核心统一连乘落地。"""
+        self._sync_movement_factors(player)
 
     def _clear_thirst_movement_modifier(self, player) -> None:
-        """移除本插件移速调整（因子回到 1.0），保留其他插件的改动。"""
+        """移除本插件全部移速因子（创造旁路/退出），保留其他插件的改动。"""
+        core = self._get_attr_core()
+        if core is None:
+            return
         try:
-            self._set_speed_factor(player, self.SPEED_FACTOR_NEUTRAL)
-        except Exception:
-            pass
-
-    def _forget_speed_factor(self, player) -> None:
-        """玩家退出时丢掉因子记录（退出前应已 clear）。"""
-        try:
-            xuid = self._get_player_xuid(player)
-            self.player_xuid_to_speed_factor.pop(xuid, None)
+            for source in ("ars:base", "ars:thirst", "ars:leg"):
+                try:
+                    core.api_remove_factor(player, "walk_speed", source)
+                except Exception:
+                    pass
         except Exception:
             pass
 
@@ -1490,18 +1591,6 @@ class ARCRealisticSurvivalPlugin(Plugin):
             except Exception:
                 return None
         return None
-
-    def _run_player_task(self, player, fn, delay: int = 0):
-        xuid = str(getattr(player, "xuid", "") or "").strip()
-        name = str(getattr(player, "name", "") or "").strip()
-
-        def _wrapped() -> None:
-            p = self._resolve_online_player(xuid, name)
-            if p is None:
-                return
-            fn(p)
-
-        return self.server.scheduler.run_task(self, _wrapped, delay=delay)
 
     def _parse_dehydrated_since(self, raw) -> float | None:
         if raw is None or raw == "":
@@ -1719,6 +1808,16 @@ class ARCRealisticSurvivalPlugin(Plugin):
                             # 满值每秒检测：每次都 kill，死亡才清零
                             self.zombie_virus_manager.tick_max_infection(player)
 
+                        # 骨裂：每秒自动痊愈检查 + 移动掉血（读取并清空本秒移动标记）
+                        if self.fracture_manager is not None:
+                            moved_second = getattr(player, '_arc_moved_second', False)
+                            if hasattr(player, '_arc_moved_second'):
+                                try:
+                                    delattr(player, '_arc_moved_second')
+                                except Exception:
+                                    pass
+                            self.fracture_manager.tick_second(player, moved_second)
+
                         if do_nutrition and self.nutrition_manager is not None:
                             self.nutrition_manager.tick_decay_for_player(player)
                 except Exception as e:
@@ -1738,9 +1837,11 @@ class ARCRealisticSurvivalPlugin(Plugin):
             self.nutrition_manager.on_player_join(player)
         if self.zombie_virus_manager is not None:
             self.zombie_virus_manager.on_player_join(player)
+        if self.fracture_manager is not None:
+            self.fracture_manager.load_player(player)
         if self._is_survival_like(player):
-            # 进服强制按原版基速重算，避免上次残留 walk_speed 叠乘成乌龟
-            self._reset_walk_speed_baseline(player)
+            # 进服重新同步移速因子（属性核心按 0.10 基线绝对重算，防上次残留）
+            self._apply_thirst_movement_modifier(player)
             self._sync_dehydration_state(player)
         else:
             self._enter_non_survival_mode(player)
@@ -1752,11 +1853,12 @@ class ARCRealisticSurvivalPlugin(Plugin):
         self._restore_snapshot_before_persist(player)
         self._persist_player_thirst(player)
         self._clear_thirst_movement_modifier(player)
-        self._forget_speed_factor(player)
         if self.nutrition_manager is not None:
             self.nutrition_manager.on_player_quit(player)
         if self.zombie_virus_manager is not None:
             self.zombie_virus_manager.on_player_quit(player)
+        if self.fracture_manager is not None:
+            self.fracture_manager.on_player_quit(player)
 
     @event_handler()
     def on_player_game_mode_change(self, event: PlayerGameModeChangeEvent):
@@ -1779,6 +1881,8 @@ class ARCRealisticSurvivalPlugin(Plugin):
     def on_actor_damage(self, event: ActorDamageEvent):
         if self.zombie_virus_manager is not None:
             self.zombie_virus_manager.on_actor_damage(event)
+        if self.fracture_manager is not None:
+            self.fracture_manager.on_actor_damage(event)
 
     @event_handler()
     def on_player_death(self, event: PlayerDeathEvent):
@@ -1787,6 +1891,9 @@ class ARCRealisticSurvivalPlugin(Plugin):
         # 任意死亡立刻清零感染（内存+数据库）；创造快照里的感染也清掉，防止切回生存又恢复
         if self.zombie_virus_manager is not None:
             self.zombie_virus_manager.reset_on_death(player)
+        # 死亡清除骨裂（骨折保留，需特效物品治疗）
+        if self.fracture_manager is not None:
+            self.fracture_manager.reset_on_death(player)
         snap = self._creative_snapshots.get(xuid)
         if snap is not None:
             snap["infection"] = 0.0
@@ -1806,6 +1913,8 @@ class ARCRealisticSurvivalPlugin(Plugin):
             self._apply_thirst_movement_modifier(player)
             if self.nutrition_manager is not None:
                 self.nutrition_manager.on_player_respawn(player)
+            if self.fracture_manager is not None:
+                self.fracture_manager.on_player_respawn(player)
         else:
             self._enter_non_survival_mode(player)
 
@@ -1815,7 +1924,9 @@ class ARCRealisticSurvivalPlugin(Plugin):
             player = event.player
             if not self._is_survival_like(player):
                 return
+            # _arc_moving_flag：口渴按衰减周期判断是否移动；_arc_moved_second：骨裂每秒判断
             setattr(player, '_arc_moving_flag', True)
+            setattr(player, '_arc_moved_second', True)
         except Exception:
             pass
 

@@ -1,100 +1,19 @@
 # -*- coding: utf-8 -*-
 """离线冒烟测试：ConsumeEffectManager 统一进食效果（stub endstone）。"""
-import sys
-import types
 import tempfile
 import os
 from pathlib import Path
 
-# ---- stub endstone 包（含主插件 import 所需的全部子模块）----
-endstone = types.ModuleType("endstone")
-endstone.__path__ = []  # 标记为包
-
-
-class GameMode:
-    SURVIVAL = "SURVIVAL"
-    ADVENTURE = "ADVENTURE"
-
-
-endstone.GameMode = GameMode
-
-
-def _mod(name):
-    m = types.ModuleType(name)
-    sys.modules[name] = m
-    setattr(endstone, name.split(".", 1)[1], m)
-    return m
-
-
-cmd_mod = _mod("endstone.command")
-cmd_mod.Command = type("Command", (), {})
-cmd_mod.CommandSender = type("CommandSender", (), {})
-
-evt_mod = _mod("endstone.event")
-
-
-def event_handler(*a, **k):
-    def deco(fn):
-        return fn
-    return deco
-
-
-evt_mod.event_handler = event_handler
-for cls_name in (
-    "PlayerItemConsumeEvent", "PlayerMoveEvent", "PlayerJoinEvent", "PlayerQuitEvent",
-    "ActorDamageEvent", "PlayerDeathEvent", "PlayerRespawnEvent", "PlayerGameModeChangeEvent",
-):
-    setattr(evt_mod, cls_name, type(cls_name, (), {}))
-
-plugin_mod = _mod("endstone.plugin")
-plugin_mod.Plugin = type("Plugin", (), {})
-
-form_mod = _mod("endstone.form")
-
-
-class _Form:
-    def __init__(self, *a, **k):
-        pass
-
-    def add_button(self, *a, **k):
-        pass
-
-
-form_mod.ActionForm = type("ActionForm", (_Form,), {})
-form_mod.ModalForm = type("ModalForm", (_Form,), {})
-form_mod.Label = type("Label", (), {"__init__": lambda self, **k: None})
-form_mod.TextInput = type("TextInput", (), {"__init__": lambda self, **k: None})
-
-attr_mod = _mod("endstone.attribute")
-
-
-class Attribute:
-    HEALTH = 1
-    PLAYER_EXHAUSTION = 2
-    ATTACK_DAMAGE = 3
-
-
-class AttributeModifier:
-    ADD = 0
-    MULTIPLY_BASE = 1
-
-    def __init__(self, *a, **k):
-        pass
-
-
-attr_mod.Attribute = Attribute
-attr_mod.AttributeModifier = AttributeModifier
-sys.modules["endstone"] = endstone
-
-SRC = Path(__file__).resolve().parent.parent / "src"
-sys.path.insert(0, str(SRC))
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _endstone_stub  # noqa: F401  安装 endstone stub
+_endstone_stub.add_src_to_path()
 
 from endstone_arc_realistic_survival.DatabaseManager import DatabaseManager
 from endstone_arc_realistic_survival.ConsumeEffectManager import ConsumeEffectManager
 from endstone_arc_realistic_survival.pack_effects import ARC_PACK_EFFECTS
 import endstone_arc_realistic_survival.arc_realistic_survival as main_mod  # 验证主插件 import 无误
 
-assert hasattr(main_mod.ARCRealisticSurvivalPlugin, "consume_manager") or True
 print("== 0) 主插件模块 import 成功")
 
 tmp = tempfile.mkdtemp()
@@ -131,6 +50,31 @@ class FakeNutri:
         return {k: 50 for k in deltas}
 
 
+class FakeFracture:
+    """对齐 FractureManager 新 API：止痛 + 腿伤处理（夹板）。"""
+
+    def __init__(self):
+        self.leg = {}  # xuid -> "crack" | "fracture"
+
+    def apply_painkiller(self, player):
+        x = player["xuid"]
+        if x not in self.leg:
+            return (False, "没有腿伤")
+        if self.leg[x] == "fracture":
+            return (False, "骨折需要夹板")
+        return (True, "")
+
+    def apply_leg_treatment(self, player):
+        x = player["xuid"]
+        if x not in self.leg:
+            return ("none", "")
+        if self.leg[x] == "fracture":
+            self.leg[x] = "crack"
+            return ("downgraded", "")
+        self.leg.pop(x)
+        return ("cured", "")
+
+
 class FakePlugin:
     def __init__(self):
         self.player_xuid_to_thirst = {}
@@ -139,6 +83,7 @@ class FakePlugin:
         self.thirst_consume_debug = False
         self.nutrition_manager = FakeNutri()
         self.zombie_virus_manager = FakeZVM()
+        self.fracture_manager = FakeFracture()
 
     def _log_consume_debug(self, msg):
         print("   [debug]", msg)
@@ -258,5 +203,49 @@ lines = cm.get_catalog_lines(limit=5)
 for line in lines:
     print("   " + line)
 assert len(lines) == 6
+
+print("\n== 9) 腿伤物品：夹板（骨折降级/骨裂痊愈）+ 止痛药")
+db.execute(
+    "INSERT OR REPLACE INTO consume_items (item_id, item_name, cure_fracture, show_toast, created_at, updated_at) "
+    "VALUES ('arc:bone_splint', '夹板', 1, 1, 'x', 'x')"
+)
+db.execute(
+    "INSERT OR REPLACE INTO consume_items (item_id, item_name, painkiller, show_toast, created_at, updated_at) "
+    "VALUES ('arc:painkiller_test', '止痛药', 1, 1, 'x', 'x')"
+)
+cm.load_items_config()
+fm = plugin.fracture_manager
+fm.leg["x2"] = "fracture"  # Alex 骨折
+splint = cm.find_cfg_by_id("arc:bone_splint")
+assert splint and splint["cure_fracture"] == 1
+status, label, bits = cm.apply_by_id(steve2, "arc:bone_splint")
+print(f"   骨折+夹板: status={status} bits={bits}")
+assert status == "applied" and "骨折已固定为骨裂" in bits
+assert fm.leg["x2"] == "crack", "夹板应把骨折降级为骨裂"
+cm._arc_applied_at.clear()  # 清 2s 防重（测试内连续吃同一物品）
+status, label, bits = cm.apply_by_id(steve2, "arc:bone_splint")
+assert status == "applied" and "腿伤已治疗" in bits
+assert "x2" not in fm.leg, "第二次使用应治愈骨裂"
+# 止痛药
+pk_item = cm.find_cfg_by_id("arc:painkiller_test")
+assert pk_item and pk_item["painkiller"] == 1
+status, label, bits = cm.apply_by_id(steve2, "arc:painkiller_test")
+assert "止痛生效" not in bits, "无腿伤不应有止痛反馈"
+fm.leg["x2"] = "crack"
+cm._arc_applied_at.clear()
+status, label, bits = cm.apply_by_id(steve2, "arc:painkiller_test")
+assert status == "applied" and "止痛生效" in bits, bits
+fm.leg["x2"] = "fracture"
+cm._arc_applied_at.clear()
+status, label, bits = cm.apply_by_id(steve2, "arc:painkiller_test")
+assert "止痛生效" not in bits, "骨折用止痛药应无效"
+print("   夹板降级/痊愈 + 止痛生效/无效边界 ok")
+
+print("\n== 10) 内置默认目录含止痛药与夹板")
+pain_default = cm.find_cfg_by_id("arc:painkiller")
+splint_default = cm.find_cfg_by_id("arc:splint")
+assert pain_default and pain_default["painkiller"] == 1
+assert splint_default and splint_default["cure_fracture"] == 1
+print(f"   arc:painkiller / arc:splint 已入目录 ok")
 
 print("\nALL SMOKE TESTS PASSED")

@@ -65,6 +65,14 @@ ARC_PACK_EFFECTS: dict[str, dict] = {
         "label": "丧尸病毒净化血清",
         "infection": -85,
     },
+    "arc:painkiller": {
+        "label": "止痛药",
+        "painkiller": 1,
+    },
+    "arc:splint": {
+        "label": "夹板",
+        "cure_fracture": 1,
+    },
 }
 
 
