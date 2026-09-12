@@ -196,7 +196,6 @@ class ARCRealisticSurvivalPlugin(Plugin):
             self.setting_manager,
             self._safe_log,
             self._get_player_xuid,
-            self._collect_item_identity_strings,
         )
         self.nutrition_manager.ensure_tables()
         self.nutrition_manager.load_settings()

@@ -1,6 +1,6 @@
 # ARC Realistic Survival - 真实生存插件
 [![Codacy Grade](https://app.codacy.com/project/badge/Grade/035827370d734c539602adbeca85f6d4)](https://app.codacy.com/gh/DEVILENMO/EndstoneMC-ARC-Realistic-Survival/dashboard?utm_source=gh&utm_medium=referral&utm_content=&utm_campaign=Badge_grade)
-[![Version](https://img.shields.io/badge/version-v0.4.1-blue)](https://github.com/DEVILENMO/EndstoneMC-ARC-Realistic-Survival)
+[![Version](https://img.shields.io/badge/version-v0.4.2-blue)](https://github.com/DEVILENMO/EndstoneMC-ARC-Realistic-Survival)
 
 
 一个为 Endstone 服务器打造的真实生存插件，添加口渴值、营养学、丧尸病毒、统一进食效果等功能，让生存体验更加真实有趣。
@@ -305,6 +305,10 @@ python -m build
 ```
 
 ## 📝 更新日志
+
+### v0.4.2
+- 修复 v0.4.0 起服务器启动即崩：`NutritionManager` 构造调用残留旧签名（多传 `collect_item_identities_fn`，类在进食配置统一时已删参）
+- 新增 `scripts/smoke_test_onload.py`：真实执行 `on_load`/`on_disable` 全流程的启动期冒烟测试，防止此类签名漂移再次发布
 
 ### v0.4.1
 - **骨裂/骨折双档系统**：坠落伤害 >5 按概率骨裂（-25% 移速、移动掉血、自愈时长随坠落高度 300+30×超出封顶 900s）；摔死进入骨折（-50% 移速、不掉血、不自动痊愈、死亡不清除）
