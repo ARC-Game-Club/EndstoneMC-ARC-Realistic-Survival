@@ -1,6 +1,6 @@
 # ARC Realistic Survival - 真实生存插件
 [![Codacy Grade](https://app.codacy.com/project/badge/Grade/035827370d734c539602adbeca85f6d4)](https://app.codacy.com/gh/DEVILENMO/EndstoneMC-ARC-Realistic-Survival/dashboard?utm_source=gh&utm_medium=referral&utm_content=&utm_campaign=Badge_grade)
-[![Version](https://img.shields.io/badge/version-v0.5.0-blue)](https://github.com/DEVILENMO/EndstoneMC-ARC-Realistic-Survival)
+[![Version](https://img.shields.io/badge/version-v0.5.1-blue)](https://github.com/DEVILENMO/EndstoneMC-ARC-Realistic-Survival)
 
 
 一个为 Endstone 服务器打造的真实生存插件，添加口渴值、营养学、统一进食效果等功能，让生存体验更加真实有趣。
@@ -12,7 +12,7 @@
 - **自动衰减**：口渴值会随时间自动降低
 - **移动加速消耗**：玩家移动时口渴值消耗速度会增加
 - **移速联动**：口渴 >80 **+20%** 移速；30～80 无加成；<30 **-20%**；<15 **-50%**。再乘基速倍率（默认 **1.0** = 原版 `walk_speed` 0.10）；以 `ars:base`/`ars:thirst`/`ars:leg` 三路因子交由硬依赖 **`arc_attribute_core`** 统一连乘管理，与其他插件的属性调整共存
-- **严重脱水**：口渴到 0 后开始计时，持续满 1 小时给予 `instant_damage` 255 秒杀
+- **严重脱水**：口渴到 0 后开始计时（**只累计在线时长**，离线时间不计时），持续满 1 小时给予 `instant_damage` 255 秒杀
 - **创造/旁观旁路**：切到创造或旁观时口渴/营养显示为正常值并停止变动；切回生存/冒险时恢复原先数值
 - **数据持久化**：玩家口渴值会自动保存到数据库
 - **实时提示**：通过弹窗显示当前口渴值
@@ -193,7 +193,7 @@ nutrition_warn_cooldown_seconds: 300  # 症状提示冷却（秒）
    - 移动状态：衰减速度翻倍
    - 口渴最低为 0（上限 100）；到 0 后不再继续扣成负数
    - 移速 = 基速倍率（默认 1.0）× 口渴分段因子（>80→1.2；30–80→1.0；<30→0.8；<15→0.5），相对叠加到 `walk_speed`
-   - 口渴为 0 持续满 1 小时：`instant_damage` 255
+   - 口渴为 0 持续满 1 小时（只计在线时长，离线暂停）：`instant_damage` 255
 
 2. **补充口渴值**：
    - 消耗配置文件中设置的物品
@@ -266,6 +266,9 @@ python -m build
 ```
 
 ## 📝 更新日志
+
+### v0.5.1
+- **修复脱水致死倒计时把离线时间计入**：`dehydrated_since` 是墙上时钟，退出落库、上线原样读回，口渴 0 的玩家离线满 1 小时后再上线会在上线瞬间被秒杀（或剩余宽限被离线时长吃掉）；现在上线加载时按该行 `updated_at`（≈下线时刻）顺延计时起点，倒计时只累计在线时长
 
 ### v0.5.0
 - **移除丧尸病毒感染值机制**：删除 `ZombieVirusManager` 及感染相关命令（`/purify`、`/ars infection`、`/ars infectset`）、感染面板/侧边栏行/配置面板项；`consume_items` 不再处理 `infection_delta`（表中旧列保留但被忽略），抗病毒/净化类 arc 物品从内置默认目录移除

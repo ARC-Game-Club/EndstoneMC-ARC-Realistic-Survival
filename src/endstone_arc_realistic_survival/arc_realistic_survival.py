@@ -1357,10 +1357,25 @@ class ARCRealisticSurvivalPlugin(Plugin):
         except Exception:
             return None
 
+    def _exclude_offline_from_dehydration(self, since: float, updated_at_raw) -> float:
+        """脱水倒计时只计在线时长：按上次落库时间（≈下线时刻）把离线时长从起点顺延。
+
+        dehydrated_since 是墙上时钟；直接带回内存会把整个离线时长计入 elapsed，
+        导致口渴 0 的玩家离线满 1 小时后上线即被秒杀。顺延量 = now - updated_at。
+        """
+        try:
+            saved_at = datetime.datetime.fromisoformat(str(updated_at_raw).strip())
+            offline = (datetime.datetime.utcnow() - saved_at).total_seconds()
+        except Exception:
+            return since
+        if offline <= 0:
+            return since
+        return since + offline
+
     def _load_player_thirst(self, player) -> int:
         xuid = self._get_player_xuid(player)
         row = self.db_manager.query_one(
-            "SELECT thirst, dehydrated_since FROM player_thirst WHERE xuid=?",
+            "SELECT thirst, dehydrated_since, updated_at FROM player_thirst WHERE xuid=?",
             (xuid,),
         )
         if row is None:
@@ -1384,9 +1399,10 @@ class ARCRealisticSurvivalPlugin(Plugin):
                     'warning',
                     f"[ARCRealisticSurvival] 玩家 {player.name} 口渴值 {raw_thirst} 已修正为 {clamped}",
                 )
-            self.player_xuid_to_dehydrated_since[xuid] = self._parse_dehydrated_since(
-                row.get("dehydrated_since")
-            )
+            since = self._parse_dehydrated_since(row.get("dehydrated_since"))
+            if since is not None and clamped <= 0:
+                since = self._exclude_offline_from_dehydration(since, row.get("updated_at"))
+            self.player_xuid_to_dehydrated_since[xuid] = since
         return self.player_xuid_to_thirst[xuid]
 
     def _persist_player_thirst(self, player) -> None:
