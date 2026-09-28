@@ -9,7 +9,6 @@ consume_items 表为准；行为包脚本不再调用 /arseffect 指令。
 # key: 完整物品 ID（小写）
 # thirst: 口渴增量
 # vitamin_a / vitamin_c / iron / protein: 营养增量
-# infection: 感染增量（负数为净化）
 ARC_PACK_EFFECTS: dict[str, dict] = {
     "arc:bottled_water": {
         "label": "瓶装矿泉水",
@@ -52,18 +51,6 @@ ARC_PACK_EFFECTS: dict[str, dict] = {
         "vitamin_c": 20,
         "iron": 20,
         "protein": 20,
-    },
-    "arc:antiviral_weak": {
-        "label": "抗丧尸病毒片",
-        "infection": -15,
-    },
-    "arc:antiviral_strong": {
-        "label": "强效丧尸病毒抑制剂",
-        "infection": -40,
-    },
-    "arc:purge_serum": {
-        "label": "丧尸病毒净化血清",
-        "infection": -85,
     },
     "arc:painkiller": {
         "label": "止痛药",

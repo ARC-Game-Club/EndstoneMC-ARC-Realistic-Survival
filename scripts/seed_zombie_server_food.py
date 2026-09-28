@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """为丧尸服 ARCRealisticSurvival 数据库写入统一进食效果表 consume_items（sgs_farm + 原版）。
 
-v0.3.34 起插件改用单一 consume_items 表（口渴/营养/感染一行配齐），
+v0.3.34 起插件改用单一 consume_items 表（口渴/营养一行配齐），
 旧 thirst_items / nutrition_items 仅作迁移来源，不再被运行时读取。
 """
 import datetime
@@ -510,7 +510,6 @@ def ensure_tables(cur: sqlite3.Cursor) -> None:
             vitamin_c INTEGER NOT NULL DEFAULT 0,
             iron INTEGER NOT NULL DEFAULT 0,
             protein INTEGER NOT NULL DEFAULT 0,
-            infection_delta INTEGER NOT NULL DEFAULT 0,
             buffs TEXT,
             show_toast INTEGER NOT NULL DEFAULT 0,
             created_at TEXT,
@@ -522,11 +521,11 @@ def ensure_tables(cur: sqlite3.Cursor) -> None:
 
 def upsert_food(cur: sqlite3.Cursor, item_id: str, name: str, thirst: int, nutrition: tuple[int, int, int, int], now: str) -> None:
     va, vc, fe, pr = nutrition
-    # 只覆盖口渴/营养/名称；infection_delta、buffs、show_toast 保留表中现有值
+    # 只覆盖口渴/营养/名称；buffs、show_toast 保留表中现有值
     cur.execute(
         """
-        INSERT INTO consume_items (item_id, item_name, thirst_delta, vitamin_a, vitamin_c, iron, protein, infection_delta, buffs, show_toast, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, 0, NULL, 0, ?, ?)
+        INSERT INTO consume_items (item_id, item_name, thirst_delta, vitamin_a, vitamin_c, iron, protein, buffs, show_toast, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, NULL, 0, ?, ?)
         ON CONFLICT(item_id) DO UPDATE SET
             item_name=excluded.item_name,
             thirst_delta=excluded.thirst_delta,

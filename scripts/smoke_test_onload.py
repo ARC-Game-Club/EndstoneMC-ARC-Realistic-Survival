@@ -32,7 +32,6 @@ try:
     assert plugin.setting_manager is not None
     assert plugin.language_manager is not None
     assert plugin.nutrition_manager is not None, "NutritionManager 构造失败"
-    assert plugin.zombie_virus_manager is not None
     assert plugin.consume_manager is not None, "ConsumeEffectManager 构造失败"
     assert plugin.fracture_manager is not None, "FractureManager 构造失败"
 

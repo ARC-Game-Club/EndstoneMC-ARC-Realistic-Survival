@@ -1,9 +1,9 @@
 # ARC Realistic Survival - 真实生存插件
 [![Codacy Grade](https://app.codacy.com/project/badge/Grade/035827370d734c539602adbeca85f6d4)](https://app.codacy.com/gh/DEVILENMO/EndstoneMC-ARC-Realistic-Survival/dashboard?utm_source=gh&utm_medium=referral&utm_content=&utm_campaign=Badge_grade)
-[![Version](https://img.shields.io/badge/version-v0.4.2-blue)](https://github.com/DEVILENMO/EndstoneMC-ARC-Realistic-Survival)
+[![Version](https://img.shields.io/badge/version-v0.5.0-blue)](https://github.com/DEVILENMO/EndstoneMC-ARC-Realistic-Survival)
 
 
-一个为 Endstone 服务器打造的真实生存插件，添加口渴值、营养学、丧尸病毒、统一进食效果等功能，让生存体验更加真实有趣。
+一个为 Endstone 服务器打造的真实生存插件，添加口渴值、营养学、统一进食效果等功能，让生存体验更加真实有趣。
 
 ## ✨ 功能特性
 
@@ -13,7 +13,7 @@
 - **移动加速消耗**：玩家移动时口渴值消耗速度会增加
 - **移速联动**：口渴 >80 **+20%** 移速；30～80 无加成；<30 **-20%**；<15 **-50%**。再乘基速倍率（默认 **1.0** = 原版 `walk_speed` 0.10）；以 `ars:base`/`ars:thirst`/`ars:leg` 三路因子交由硬依赖 **`arc_attribute_core`** 统一连乘管理，与其他插件的属性调整共存
 - **严重脱水**：口渴到 0 后开始计时，持续满 1 小时给予 `instant_damage` 255 秒杀
-- **创造/旁观旁路**：切到创造或旁观时口渴/营养/感染显示为正常值并停止变动；切回生存/冒险时恢复原先数值
+- **创造/旁观旁路**：切到创造或旁观时口渴/营养显示为正常值并停止变动；切回生存/冒险时恢复原先数值
 - **数据持久化**：玩家口渴值会自动保存到数据库
 - **实时提示**：通过弹窗显示当前口渴值
 
@@ -21,15 +21,8 @@
 - **四种营养素**：维生素 A、维生素 C、铁、蛋白质，各自独立 0-100 数值
 - **缺素病症**：长期偏食触发夜盲症、坏血病、贫血、肌无力
 - **症状分级**：健康 / 轻症 / 中症 / 重症，仅在等级变化时 Toast 提示
-- **食物绑定**：每种食物的口渴/营养/感染增量统一在 SQLite `consume_items` 表配置（见「进食效果配置」）
+- **食物绑定**：每种食物的口渴/营养增量统一在 SQLite `consume_items` 表配置（见「进食效果配置」）
 - **原生 API**：通过 Endstone `Effect` 与 `AttributeModifier` 实现减益，不污染实体 NBT
-
-### 🧟 丧尸病毒系统
-- **开关**：`infection_enabled`（默认 `false`）；关闭后不产生感染、不恶化、侧边栏不显示感染行
-- **感染值 0-100**：被配置的生物攻击会增加感染值
-- **可配置感染源**：支持精确实体（如 `minecraft:zombie`）或整命名空间（如 `minecraft:`），单独实体优先于命名空间规则
-- **临界恶化**：默认超过 50 后每分钟 +5，低于 50 每分钟 -2
-- **丧尸化**：感染满 100 时先清零感染并落库，再控制台 `kill` 击杀玩家、原地生成丧尸（清零不依赖是否杀死成功）
 
 ### 🦴 腿伤系统（v0.4.1：骨裂/骨折双档）
 
@@ -43,13 +36,13 @@
 
 ### 📊 弧光核心侧边栏（v0.3.12）
 - 启动时向 `arc_core` 注册专属页面 **`ars_health`（真实生存）**
-- 显示口渴、四种营养素及严重度；**仅在 `infection_enabled=true` 时显示感染行**
+- 显示口渴、四种营养素及严重度
 - 数值变化、进服、创造旁路切换时自动推送；需弧光核心 **v0.9.0+**
 - 玩家可用 `/sidebar next` 翻到该页（页面数 ≥ 2 时也会自动轮播）
 
 ### 🍺 进食效果配置（v0.4.0 统一）
 - **单表配置**：所有食物/饮品的进食效果集中在 SQLite `consume_items` 表，一行配齐
-  `thirst_delta`（口渴）、`vitamin_a/vitamin_c/iron/protein`（营养）、`infection_delta`（感染，负数为净化）、`buffs`（药水效果 JSON）、`show_toast`（是否弹「服用了…」提示）
+  `thirst_delta`（口渴）、`vitamin_a/vitamin_c/iron/protein`（营养）、`buffs`（药水效果 JSON）、`show_toast`（是否弹「服用了…」提示）
 - **单一订阅**：插件在 `PlayerItemConsumeEvent` 一个入口按表生效；行为包脚本不再调用 `/arseffect` 指令
 - **自动迁移**：首次加载自动把内置默认（ARC 物品包目录 + 原版食物营养）与旧 `thirst_items` / `nutrition_items` 表补齐进 `consume_items`；表内已有行不会被覆盖，改成 0 即关闭（删除会被自动补回）
 - **管理测试入口**：`/arseffect <玩家> <物品ID>` 仍可手动施加同一份配置；`/ars reload` 热重载
@@ -113,25 +106,7 @@ nutrition_tick_seconds: 300      # 营养衰减间隔（秒）
 nutrition_decay_per_tick: 1      # 每次衰减的营养值
 nutrition_initial: 100           # 玩家初始营养值
 nutrition_warn_cooldown_seconds: 300  # 症状提示冷却（秒）
-infection_enabled: false         # 感染系统开关（默认关；丧尸服请设 true）
-infection_tick_seconds: 12        # 感染 tick 间隔（秒）
-infection_threshold: 50           # 恶化临界值
-infection_growth_per_minute: 5    # 超临界每分钟增长
-infection_decay_per_minute: 2     # 低于临界每分钟下降
-infection_zombie_entity: minecraft:zombie  # 丧尸化时生成的实体（单值兼容）
-infection_zombie_entities: zombie:zombie,zombie:zombie_runner,...  # 逗号分隔，满值随机生成其一
 ```
-
-### 感染源配置 (infection_sources)
-
-存储在 SQLite 表 `infection_sources`（首次启动自动播种常见僵尸类生物）：
-
-| match_pattern | 含义 | 示例 delta |
-|---------------|------|------------|
-| `minecraft:zombie` | 精确匹配该实体 | +5/击 |
-| `minecraft:` | 匹配整个命名空间下所有实体 | +2/击 |
-
-单独实体配置优先于命名空间规则。
 
 ### 营养与缺素病
 
@@ -144,7 +119,7 @@ infection_zombie_entities: zombie:zombie,zombie:zombie_runner,...  # 逗号分�
 
 症状阈值：健康 ≥60，轻症 30-59，中症 10-29，重症 <10。
 
-进食的营养/口渴/感染增量统一见下方「进食效果配置 (consume_items)」。
+进食的营养/口渴增量统一见下方「进食效果配置 (consume_items)」。
 
 ### 进食效果配置 (consume_items)
 
@@ -155,7 +130,6 @@ infection_zombie_entities: zombie:zombie,zombie:zombie_runner,...  # 逗号分�
 | `item_id` | 物品 ID（支持完整 `arc:bottled_water` 或短名匹配） |
 | `thirst_delta` | 口渴值增量 |
 | `vitamin_a` / `vitamin_c` / `iron` / `protein` | 四项营养增量 |
-| `infection_delta` | 感染增量（负数为净化） |
 | `cure_fracture` | 1 = 夹板类腿伤物品（骨折降级为骨裂、骨裂痊愈） |
 | `painkiller` | 1 = 止痛药（骨裂不减速、移动掉血保留；骨折无效） |
 | `buffs` | 药水效果 JSON，如 `[{"name":"speed","duration":30,"amplifier":1}]` |
@@ -175,19 +149,16 @@ infection_zombie_entities: zombie:zombie,zombie:zombie_runner,...  # 逗号分�
 
 | 命令 | 权限 | 描述 |
 |------|------|------|
-| `/ars` | 全员（common） | 打开个人状态（口渴/营养/感染）；**仅 OP** 可见「配置管理」 |
+| `/ars` | 全员（common） | 打开个人状态（口渴/营养）；**仅 OP** 可见「配置管理」 |
 | `/ars reload` | OP（config） | 重载配置 |
 | `/ars nutrition` | 全员 | 打开营养学面板（查看四条营养值与食物表） |
 | `/ars nutriset <玩家> <营养素> <0-100>` | OP | 调试：设置玩家指定营养素 |
-| `/ars infection` | 全员 | 打开感染面板（感染值与感染源表） |
-| `/ars infectset <玩家> <0-100>` | OP | 调试：设置玩家感染值 |
-| `/heal <玩家>` | OP/控制台 | 管理用：治愈缺素并将四项营养设为 80（**不影响感染**；物品模组不用） |
-| `/purify <玩家> <数量>` | 自身 / OP | 净化感染：感染值减少指定数量 |
+| `/heal <玩家>` | OP/控制台 | 管理用：治愈缺素并将四项营养设为 80，同时治疗骨裂/骨折（物品模组不用） |
 | `/thirstadd <玩家> <增量>` | 自身 / OP | **物品模组对接**：增减口渴值 |
 | `/nutriadd <玩家> <营养素\|all> <增量>` | 自身 / OP | **物品模组对接**：增减营养（`vitamin_a` / `vitamin_c` / `iron` / `protein` / `all`） |
-| `/arseffect <玩家> <物品ID>` | 自身 / OP | **管理测试入口**：按统一进食效果配置（`consume_items`）施加口渴/营养/感染 |
+| `/arseffect <玩家> <物品ID>` | 自身 / OP | **管理测试入口**：按统一进食效果配置（`consume_items`）施加口渴/营养 |
 
-> 普通玩家仅能对**自己**使用 `/thirstadd`、`/nutriadd`、`/purify`、`/arseffect`；改他人需 OP。权限节点：`arc_realistic_survival.command.item`（默认允许）。
+> 普通玩家仅能对**自己**使用 `/thirstadd`、`/nutriadd`、`/arseffect`；改他人需 OP。权限节点：`arc_realistic_survival.command.item`（默认允许）。
 
 ### 与 ARC 真实生存物品包对接
 
@@ -205,11 +176,8 @@ infection_zombie_entities: zombie:zombie,zombie:zombie_runner,...  # 逗号分�
 | `arc:multivitamin` | 四项各 +14 |
 | `arc:field_ration_med` | 四项各 +8，口渴 +10 |
 | `arc:recovery_injection` | 四项各 +20 |
-| `arc:antiviral_weak` | 感染 -15（等同 purify） |
-| `arc:antiviral_strong` | 感染 -40 |
-| `arc:purge_serum` | 感染 -85 |
 
-也可拆开调用，例如：`/thirstadd Steve 42`、`/nutriadd Steve vitamin_a 30`、`/purify Steve 15`。
+也可拆开调用，例如：`/thirstadd Steve 42`、`/nutriadd Steve vitamin_a 30`。
 
 ### 权限节点
 
@@ -233,7 +201,7 @@ infection_zombie_entities: zombie:zombie,zombie:zombie_runner,...  # 逗号分�
    - **死亡重置**为初始口渴值
 
 3. **进食效果**：
-   - 进食/饮水按 `consume_items` 表一次性应用口渴、营养、感染与药水 buffs
+   - 进食/饮水按 `consume_items` 表一次性应用口渴、营养与药水 buffs
    - 支持所有原版药水效果（通过 Endstone 原生 `Effect` API）
 
 4. **营养学**：
@@ -241,12 +209,6 @@ infection_zombie_entities: zombie:zombie,zombie:zombie_runner,...  # 逗号分�
    - 进食匹配 `consume_items` 表的食物可补充对应营养
    - 使用 `/ars nutrition` 查看当前状态与食物营养表
    - **死亡不重置**，重生后按存档数值恢复缺素症状
-
-5. **丧尸病毒**：
-   - 被配置生物攻击增加感染值
-   - 超过临界值持续恶化，满值丧尸化
-   - **死亡重置**感染值为 0（丧尸化 / 普通死亡 / 重生均强制清零落库）
-   - 使用 `/ars infection` 查看当前感染状态
 
 ## 🗄️ 数据存储
 
@@ -256,8 +218,7 @@ infection_zombie_entities: zombie:zombie,zombie:zombie_runner,...  # 逗号分�
 - **存储内容**：
   - 玩家口渴值
   - 玩家四种营养素数值
-  - 玩家感染值
-  - 进食效果配置表（`consume_items`）与感染源配置表（`infection_sources`）
+  - 进食效果配置表（`consume_items`）
   - 最后更新时间
   - 玩家名称
 
@@ -305,6 +266,11 @@ python -m build
 ```
 
 ## 📝 更新日志
+
+### v0.5.0
+- **移除丧尸病毒感染值机制**：删除 `ZombieVirusManager` 及感染相关命令（`/purify`、`/ars infection`、`/ars infectset`）、感染面板/侧边栏行/配置面板项；`consume_items` 不再处理 `infection_delta`（表中旧列保留但被忽略），抗病毒/净化类 arc 物品从内置默认目录移除
+- **修复移动加速口渴消耗从不生效**：旧实现用 `setattr(player, '_arc_moving_flag', ...)` 给玩家对象挂动态属性，但 endstone 的 `Player` 是 pybind11 绑定类（未开 `py::dynamic_attr`），setattr 静默失败，移动倍率从未生效；改为插件侧按 xuid 记录移动标记（口渴按衰减周期、骨裂按每秒），退出时清理（骨裂的每秒移动掉血同样由此修复）
+- 新增 `scripts/smoke_test_move_thirst.py` 覆盖移动标记与口渴倍率链路
 
 ### v0.4.2
 - 修复 v0.4.0 起服务器启动即崩：`NutritionManager` 构造调用残留旧签名（多传 `collect_item_identities_fn`，类在进食配置统一时已删参）

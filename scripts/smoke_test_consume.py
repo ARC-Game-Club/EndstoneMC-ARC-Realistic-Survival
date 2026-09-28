@@ -28,19 +28,6 @@ db.insert("nutrition_items", {"item_id": "minecraft:bread", "item_name": "面包
 
 
 # ---- fake plugin ----
-class FakeZVM:
-    def __init__(self):
-        self.player_infection = {}
-        self.enabled = True
-
-    def apply_delta(self, player, delta, source_label=""):
-        xuid = player["xuid"]
-        old = float(self.player_infection.get(xuid, 0.0))
-        new = max(0.0, min(100.0, old + float(delta)))
-        self.player_infection[xuid] = new
-        return new
-
-
 class FakeNutri:
     def __init__(self):
         self.calls = []
@@ -82,7 +69,6 @@ class FakePlugin:
         self.thirst_max = 100
         self.thirst_consume_debug = False
         self.nutrition_manager = FakeNutri()
-        self.zombie_virus_manager = FakeZVM()
         self.fracture_manager = FakeFracture()
 
     def _log_consume_debug(self, msg):
@@ -100,12 +86,6 @@ class FakePlugin:
 
     def _sync_creative_snap_nutrition(self, p, d):
         pass
-
-    def _sync_creative_snap_infection(self, p, v):
-        pass
-
-    def _is_infection_enabled(self):
-        return self.zombie_virus_manager.enabled
 
     def _get_player_xuid(self, player):
         return player["xuid"]
@@ -176,35 +156,24 @@ cm.on_player_consume(steve2, {"ids": ["minecraft:bread"]})
 assert plugin.player_xuid_to_thirst["x2"] == 40
 print("   非 arc 物品连续吃不 dedup: ok")
 
-print("\n== 6) /arseffect 命令路径 + 感染净化")
-plugin.zombie_virus_manager.player_infection["x2"] = 30.0
-status, label, bits = cm.apply_by_id(steve2, "arc:antiviral_weak")
-print(f"   status={status} label={label} bits={bits} infection={plugin.zombie_virus_manager.player_infection['x2']}")
-assert status == "applied" and bits == ["感染-15"]
-assert plugin.zombie_virus_manager.player_infection["x2"] == 15.0
-status2, _, _ = cm.apply_by_id(steve2, "arc:antiviral_weak")
+print("\n== 6) /arseffect 命令路径 + 去重")
+status, label, bits = cm.apply_by_id(steve2, "arc:vitamin_a_pill")
+print(f"   status={status} label={label} bits={bits}")
+assert status == "applied" and bits == ["维生素A+30"]
+status2, _, _ = cm.apply_by_id(steve2, "arc:vitamin_a_pill")
 assert status2 == "deduped", "命令路径 2s 去重应生效"
 print("   命令路径 dedup: ok")
 status3, _, _ = cm.apply_by_id(steve2, "arc:not_exist")
 assert status3 == "unknown"
 print("   未知物品: ok")
 
-print("\n== 7) 感染关闭时跳过感染增量")
-plugin.zombie_virus_manager.enabled = False
-cm._arc_applied_at.clear()
-steve3 = {"name": "Bob", "xuid": "x3", "ids": ["arc:purge_serum"]}
-status, label, bits = cm.apply_by_id(steve3, "arc:purge_serum")
-print(f"   status={status} bits={bits}")
-assert bits == []
-print("   ok")
-
-print("\n== 8) 面板目录行")
+print("\n== 7) 面板目录行")
 lines = cm.get_catalog_lines(limit=5)
 for line in lines:
     print("   " + line)
 assert len(lines) == 6
 
-print("\n== 9) 腿伤物品：夹板（骨折降级/骨裂痊愈）+ 止痛药")
+print("\n== 8) 腿伤物品：夹板（骨折降级/骨裂痊愈）+ 止痛药")
 db.execute(
     "INSERT OR REPLACE INTO consume_items (item_id, item_name, cure_fracture, show_toast, created_at, updated_at) "
     "VALUES ('arc:bone_splint', '夹板', 1, 1, 'x', 'x')"

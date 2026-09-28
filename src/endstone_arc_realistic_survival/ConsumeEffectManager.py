@@ -1,4 +1,4 @@
-"""统一进食效果管理：单一 consume_items 配置表驱动口渴/营养/感染变动与腿伤治疗。
+"""统一进食效果管理：单一 consume_items 配置表驱动口渴/营养变动与腿伤治疗。
 
 取代旧的三套进食配置：
 - thirst_items（口渴增量 + buffs）
@@ -24,7 +24,7 @@ from .NutritionManager import NUTRIENT_KEYS, NUTRIENT_LABELS
 from .pack_effects import ARC_PACK_EFFECTS, normalize_item_id
 
 
-# 原版食物营养默认（自 NutritionManager 迁入，仅营养，无口渴/感染）
+# 原版食物营养默认（自 NutritionManager 迁入，仅营养，无口渴）
 DEFAULT_NUTRITION_ITEMS = [
     ("minecraft:carrot", "胡萝卜", 25, 2, 1, 1),
     ("minecraft:golden_carrot", "金胡萝卜", 40, 3, 2, 2),
@@ -67,7 +67,6 @@ CONSUME_ITEMS_FIELDS = {
     "vitamin_c": "INTEGER NOT NULL DEFAULT 0",
     "iron": "INTEGER NOT NULL DEFAULT 0",
     "protein": "INTEGER NOT NULL DEFAULT 0",
-    "infection_delta": "INTEGER NOT NULL DEFAULT 0",
     "cure_fracture": "INTEGER NOT NULL DEFAULT 0",
     "painkiller": "INTEGER NOT NULL DEFAULT 0",
     "buffs": "TEXT",
@@ -86,7 +85,6 @@ def _zero_row(item_id: str) -> dict:
         "vitamin_c": 0,
         "iron": 0,
         "protein": 0,
-        "infection_delta": 0,
         "cure_fracture": 0,
         "painkiller": 0,
         "buffs": None,
@@ -95,7 +93,7 @@ def _zero_row(item_id: str) -> dict:
 
 
 class ConsumeEffectManager:
-    """进食效果统一配置：item_id → 口渴/营养/感染增量 + buffs。"""
+    """进食效果统一配置：item_id → 口渴/营养增量 + buffs。"""
 
     def __init__(
         self,
@@ -135,7 +133,7 @@ class ConsumeEffectManager:
         try:
             rows = self.db_manager.query_all(
                 "SELECT item_id, item_name, thirst_delta, vitamin_a, vitamin_c, iron, protein, "
-                "infection_delta, cure_fracture, painkiller, buffs, show_toast FROM consume_items "
+                "cure_fracture, painkiller, buffs, show_toast FROM consume_items "
                 "WHERE item_id IS NOT NULL AND item_id != ''"
             )
             for row in rows:
@@ -159,7 +157,6 @@ class ConsumeEffectManager:
                     "vitamin_c": int(row.get("vitamin_c", 0) or 0),
                     "iron": int(row.get("iron", 0) or 0),
                     "protein": int(row.get("protein", 0) or 0),
-                    "infection_delta": int(row.get("infection_delta", 0) or 0),
                     "cure_fracture": int(row.get("cure_fracture", 0) or 0),
                     "painkiller": int(row.get("painkiller", 0) or 0),
                     "buffs": buffs_list,
@@ -193,7 +190,6 @@ class ConsumeEffectManager:
             row["thirst_delta"] = int(eff.get("thirst", 0) or 0)
             for k in NUTRIENT_KEYS:
                 row[k] = int(eff.get(k, 0) or 0)
-            row["infection_delta"] = int(eff.get("infection", 0) or 0)
             # 特殊效果列（止痛药/夹板等腿伤物品）
             for flag in ("painkiller", "cure_fracture"):
                 if flag in eff:
@@ -323,7 +319,7 @@ class ConsumeEffectManager:
     # ---------- 应用 ----------
 
     def on_player_consume(self, player, item) -> bool:
-        """PlayerItemConsumeEvent 统一入口：命中配置即一次性应用口渴/营养/感染/buffs。"""
+        """PlayerItemConsumeEvent 统一入口：命中配置即一次性应用口渴/营养/buffs。"""
         cfg, lookup_key = self.find_cfg_for_item(item)
         if cfg is None:
             identities = self._collect_item_identities(item)
@@ -409,14 +405,6 @@ class ConsumeEffectManager:
                     f"{NUTRIENT_LABELS.get(k, k)}{v:+d}" for k, v in nutri.items() if v
                 )
 
-        infection = int(cfg.get("infection_delta", 0) or 0)
-        if infection and self.plugin._is_infection_enabled():
-            zvm = getattr(self.plugin, "zombie_virus_manager", None)
-            if zvm is not None:
-                new_val = zvm.apply_delta(player, float(infection), source_label="")
-                self.plugin._sync_creative_snap_infection(player, new_val)
-                bits.append(f"感染{infection:+d}")
-
         buffs = cfg.get("buffs") or []
         if buffs:
             self._apply_buffs(player, buffs)
@@ -483,8 +471,8 @@ class ConsumeEffectManager:
         lines = ["=== 进食效果配置（节选）==="]
         try:
             rows = self.db_manager.query_all(
-                "SELECT item_name, item_id, thirst_delta, vitamin_a, vitamin_c, iron, protein, "
-                "infection_delta FROM consume_items ORDER BY item_name LIMIT ?",
+                "SELECT item_name, item_id, thirst_delta, vitamin_a, vitamin_c, iron, protein "
+                "FROM consume_items ORDER BY item_name LIMIT ?",
                 (limit,),
             )
             for row in rows:
@@ -500,8 +488,6 @@ class ConsumeEffectManager:
                     parts.append(f"铁+{int(row['iron'])}")
                 if int(row.get("protein", 0) or 0):
                     parts.append(f"蛋白+{int(row['protein'])}")
-                if int(row.get("infection_delta", 0) or 0):
-                    parts.append(f"感染{int(row['infection_delta']):+d}")
                 lines.append(f"{name}: {' '.join(parts) or '无效果'}")
         except Exception:
             lines.append("（无法读取进食效果表）")

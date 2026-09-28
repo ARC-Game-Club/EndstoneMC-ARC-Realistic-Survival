@@ -309,7 +309,7 @@ class NutritionManager:
                 pass
 
     def heal_to(self, player, value: int = 80) -> dict[str, int]:
-        """治愈缺素病症：四项营养设为指定值并清除症状（不影响感染）。"""
+        """治愈缺素病症：四项营养设为指定值并清除症状。"""
         xuid = self._get_xuid(player)
         target = self._clamp(int(value))
         old_severity = dict(self.player_severity.get(xuid, {}))

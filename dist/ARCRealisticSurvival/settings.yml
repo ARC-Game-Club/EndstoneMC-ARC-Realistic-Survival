@@ -10,5 +10,4 @@ thirst_speed_severe_threshold=15
 thirst_speed_severe=-0.50
 thirst_fatal_seconds=3600
 walk_speed_base_multiplier=1.0
-infection_enabled=false
 
